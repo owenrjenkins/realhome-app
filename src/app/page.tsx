@@ -1,72 +1,117 @@
 'use client';
-import { useEffect, useState } from "react";
-import { loadListingsCsv, type MinimalListing } from "@/lib/loadCsv";
+import { useEffect, useState } from 'react';
+import dynamic from 'next/dynamic';
+import LoadingSpinner from '@/components/LoadingSpinner';
+import ErrorBanner from '@/components/ErrorBanner';
+import Badge from '@/components/Badge';
+import { loadListingsCsv, type MinimalListing } from '@/lib/loadCsv';
+
+const Map = dynamic(() => import('@/components/Map'), { ssr: false });
+
+type Tile = { lat: number; lng: number; score: number; parts?: { commute:number; amenity:number; vibe:number } };
 
 export default function Page() {
-  const [listings, setListings] = useState<MinimalListing[] | null>(null);
-  const [csvError, setCsvError] = useState<string | null>(null);
+  const [text, setText] = useState<string>(
+    'In London, quiet street near a big park, cafés and a good supermarket, within 45 minutes to City of London by transit.'
+  );
 
+  const [center, setCenter] = useState<{lat:number;lng:number} | null>(null);
+  const [tiles, setTiles] = useState<Tile[]>([]);
+  const [listings, setListings] = useState<MinimalListing[] | null>(null);
+
+  const [loading, setLoading] = useState(false);
+  const [errMsg, setErrMsg] = useState<string>('');
+
+  // Load CSV once
   useEffect(() => {
     loadListingsCsv()
       .then(data => setListings(data))
-      .catch(err => setCsvError(err.message));
+      .catch(err => setErrMsg(`CSV load failed: ${err.message}`));
   }, []);
+
+  async function runSearch() {
+    setErrMsg('');
+    setLoading(true);
+    try {
+      // parse then score
+      const parsedRes = await fetch('/api/parse', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+      if (!parsedRes.ok) throw new Error(`Parse error (${parsedRes.status})`);
+      const parsed = await parsedRes.json();
+
+      const scoreRes = await fetch('/api/score', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parsed }) });
+      if (!scoreRes.ok) {
+        const j = await scoreRes.json().catch(()=> ({}));
+        throw new Error(j?.error || `Score error (${scoreRes.status})`);
+      }
+      const json = await scoreRes.json();
+      setCenter(json.center);
+      setTiles(json.results || []);
+    } catch (e: unknown) {
+      const error = e as Error;
+      setErrMsg(error?.message || 'Something went wrong while scoring. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  }
 
   return (
     <main className="max-w-5xl mx-auto p-6 space-y-6">
-      <header className="space-y-2">
-        <h1 className="text-3xl font-bold">RealHome</h1>
-        <p className="text-gray-600">UK Property Search with Smart Location Scoring</p>
-      </header>
-
-      <section className="space-y-4">
-        <div className="bg-white border rounded-lg p-4">
-          <h2 className="text-lg font-semibold mb-4">Find Your Perfect Area</h2>
-          <textarea
-            className="w-full p-3 border rounded-md resize-none h-24"
-            placeholder="Describe your ideal location... e.g., 'In London quiet street near a big park cafes a good supermarket within 45 minutes to City of London by transit'"
-          />
-          <button className="mt-3 px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
-            Find Areas
-          </button>
+      <div className="flex items-center justify-between">
+        <h1 className="text-3xl font-semibold">RealHome</h1>
+        <div className="flex items-center gap-2">
+          {listings && <Badge>Listings loaded: {listings.length.toLocaleString()}</Badge>}
+          <Badge>Tiles cap: {process.env.NEXT_PUBLIC_TILES_CAP || process.env.REALHOME_MAX_TILES || 160}</Badge>
         </div>
-      </section>
+      </div>
 
-      <section className="space-y-2">
-        <h2 className="text-lg font-semibold">Listings Overlay</h2>
-        {csvError && <div className="text-red-600 text-sm">CSV error: {csvError}</div>}
-        {!listings && !csvError && <div className="text-sm">Loading listings…</div>}
-        {listings && (
-          <div className="space-y-2">
-            <div className="text-xs text-gray-600">Loaded {listings.length} listings</div>
-            <div className="bg-gray-50 border rounded-lg p-4">
-              <h3 className="font-medium mb-2">Sample Listings</h3>
-              <div className="grid gap-2 text-sm">
-                {listings.slice(0, 5).map(listing => (
-                  <div key={listing.id} className="flex justify-between items-center py-1 border-b border-gray-200 last:border-b-0">
-                    <div>
-                      <span className="font-medium">{listing.city}</span>
-                      <span className="text-gray-500 ml-2">{listing.property_type}</span>
-                      <span className="text-gray-500 ml-2">{listing.bedrooms} bed</span>
-                    </div>
-                    <div className="text-right">
-                      <div className="font-medium">£{listing.price_gbp.toLocaleString()}</div>
-                      <div className="text-xs text-gray-500">{listing.postcode}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
+      {errMsg && <ErrorBanner message={errMsg} />}
+
+      <div className="space-y-3">
+        <label className="block text-sm font-medium">Describe your ideal location</label>
+        <textarea
+          className="w-full rounded-xl border p-3"
+          rows={4}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="e.g., In Manchester, 30 min to Piccadilly by transit, near a big park and cafés, quiet at night."
+        />
+        <button
+          onClick={runSearch}
+          disabled={loading}
+          className="rounded-xl px-4 py-2 bg-black text-white disabled:opacity-60"
+        >
+          {loading ? 'Finding areas…' : 'Find areas'}
+        </button>
+        {loading && <LoadingSpinner label="Scoring candidate areas…" />}
+      </div>
+
+      {center && (
+        <div className="grid md:grid-cols-2 gap-6">
+          <div>
+            <Map
+              center={center}
+              tiles={tiles.slice(0, 160)}
+              listings={(listings || []).slice(0, 300)}
+            />
           </div>
-        )}
-      </section>
-
-      <section className="space-y-2">
-        <h2 className="text-lg font-semibold">Map View</h2>
-        <div className="bg-gray-100 border rounded-lg h-96 flex items-center justify-center">
-          <div className="text-gray-500">Map integration coming soon...</div>
+          <div className="space-y-3">
+            <h2 className="text-lg font-medium">Top matches</h2>
+            <ol className="space-y-2">
+              {tiles.slice(0, 12).map((r, i) => (
+                <li key={i} className="rounded-xl border p-3">
+                  <div className="font-medium">Score {(r.score * 100).toFixed(0)}%</div>
+                  {r.parts && (
+                    <div className="text-xs text-gray-600">
+                      Commute {(r.parts.commute * 100).toFixed(0)}% · Amenities {(r.parts.amenity * 100).toFixed(0)}%
+                    </div>
+                  )}
+                  <div className="text-xs text-gray-600">Lat {r.lat.toFixed(4)}, Lng {r.lng.toFixed(4)}</div>
+                </li>
+              ))}
+            </ol>
+          </div>
         </div>
-      </section>
+      )}
     </main>
   );
 }
