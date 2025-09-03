@@ -1,78 +1,29 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 
-export async function POST(request: NextRequest) {
-  try {
-    const { text } = await request.json();
-    
-    if (!text || typeof text !== 'string') {
-      return NextResponse.json({ error: 'Text is required' }, { status: 400 });
-    }
+export async function POST(req: Request) {
+  const { text } = await req.json();
+  const t = (text || "").toLowerCase();
 
-    // Simple parsing logic - extract location preferences
-    const parsed = {
-      location: extractLocation(text),
-      preferences: extractPreferences(text),
-      commute: extractCommute(text),
-      amenities: extractAmenities(text)
-    };
+  // area
+  const areaMatch = t.match(/in\s+([a-z0-9 .,'-]+?)(?:\.|,|$)/i);
+  const areaCenter = areaMatch ? areaMatch[1].trim() : "London, UK";
 
-    return NextResponse.json(parsed);
-  } catch (error) {
-    console.error('Parse error:', error);
-    return NextResponse.json({ error: 'Failed to parse text' }, { status: 500 });
+  // budget
+  let maxBudget: number | undefined;
+  const bud = t.match(/(?:budget|under|max)\s*£?\s*([\d,.]+)\s*(m|k)?/i);
+  if (bud) {
+    const base = Number(bud[1].replace(/[,£\s]/g,""));
+    const unit = (bud[2]||"").toLowerCase();
+    maxBudget = unit === "m" ? base * 1_000_000 : unit === "k" ? base * 1_000 : base;
   }
-}
 
-function extractLocation(text: string): string {
-  const locationPatterns = [
-    /in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/gi,
-    /near\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/gi
-  ];
-  
-  for (const pattern of locationPatterns) {
-    const match = text.match(pattern);
-    if (match) {
-      return match[0].replace(/^(in|near)\s+/i, '').trim();
-    }
-  }
-  
-  return 'London'; // Default fallback
-}
+  // beds
+  const bm = t.match(/(\d+)\s*(?:bed|beds|bedroom|bedrooms)/);
+  const beds = bm ? Number(bm[1]) : undefined;
 
-function extractPreferences(text: string): string[] {
-  const preferences = [];
-  
-  if (/quiet/i.test(text)) preferences.push('quiet');
-  if (/park/i.test(text)) preferences.push('near_park');
-  if (/caf[eé]s?/i.test(text)) preferences.push('cafes');
-  if (/supermarket/i.test(text)) preferences.push('supermarket');
-  if (/transport|transit/i.test(text)) preferences.push('good_transport');
-  
-  return preferences;
-}
+  // commute
+  const commute = { address: "City of London", mode: "transit", maxMins: 45 };
 
-function extractCommute(text: string): { destination?: string; maxTime?: number } {
-  const commuteMatch = text.match(/(\d+)\s*min(?:utes?)?\s*to\s+([^,\.]+)/i);
-  
-  if (commuteMatch) {
-    return {
-      destination: commuteMatch[2].trim(),
-      maxTime: parseInt(commuteMatch[1])
-    };
-  }
-  
-  return {};
-}
-
-function extractAmenities(text: string): string[] {
-  const amenities = [];
-  
-  if (/park/i.test(text)) amenities.push('park');
-  if (/caf[eé]s?/i.test(text)) amenities.push('cafe');
-  if (/supermarket|shop/i.test(text)) amenities.push('supermarket');
-  if (/restaurant/i.test(text)) amenities.push('restaurant');
-  if (/gym/i.test(text)) amenities.push('gym');
-  
-  return amenities;
+  return NextResponse.json({ areaCenter, maxBudget, beds, commutes: [commute] });
 }
 

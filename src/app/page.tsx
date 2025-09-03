@@ -60,7 +60,7 @@ export default function Page() {
         <h1 className="text-3xl font-semibold">RealHome</h1>
         <div className="flex items-center gap-2">
           {listings && <Badge>Listings loaded: {listings.length.toLocaleString()}</Badge>}
-          <Badge>Tiles cap: {process.env.NEXT_PUBLIC_TILES_CAP || process.env.REALHOME_MAX_TILES || 160}</Badge>
+          <Badge>Tiles cap: {process.env.REALHOME_MAX_TILES || 140}</Badge>
         </div>
       </div>
 
@@ -90,7 +90,7 @@ export default function Page() {
           <div>
             <Map
               center={center}
-              tiles={tiles.slice(0, 160)}
+              tiles={tiles.slice(0, parseInt(process.env.REALHOME_MAX_TILES || '140'))}
               listings={(listings || []).slice(0, 300)}
             />
           </div>
