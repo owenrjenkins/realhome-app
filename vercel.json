@@ -4,14 +4,5 @@
       "maxDuration": 30
     }
   },
-  "env": {
-    "GOOGLE_MAPS_SERVER_KEY": "@google_maps_server_key",
-    "NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY": "@google_maps_browser_key",
-    "NEXT_PUBLIC_DATA_URL": "/data/realhome_listings_uk_sales_minimal.csv",
-    "REALHOME_MAX_TILES": "140",
-    "REALHOME_PLACES_RADIUS": "800",
-    "REALHOME_DISABLE_PLACES": "0",
-    "REALHOME_DISABLE_DISTMATRIX": "0"
-  }
-}
+
 
