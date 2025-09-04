@@ -3,20 +3,29 @@ import { NextResponse } from "next/server";
 const BASE = "https://maps.googleapis.com/maps/api/distancematrix/json";
 const KEY = process.env.GOOGLE_MAPS_SERVER_KEY!;
 
-// Google allows up to 25 destinations per request on the standard tier.
-// We'll chunk to be safe and return a map id -> minutes.
+/**
+ * POST /api/commute
+ * Body: {
+ *   origin: { lat, lng },
+ *   mode: "transit"|"driving"|"walking"|"bicycling",
+ *   listings: [{ id, latitude, longitude }]
+ * }
+ * Returns: { durations: { [listingId]: minutes } }
+ */
 export async function POST(req: Request) {
   try {
     const { origin, mode = "transit", listings = [] } = await req.json();
+
     if (!origin?.lat || !origin?.lng) throw new Error("missing_origin");
     if (!Array.isArray(listings) || listings.length === 0) {
       return NextResponse.json({ durations: {} });
     }
 
+    // Distance Matrix: up to 25 destinations/request on standard tier.
+    const chunkSize = 25;
     const chunks: any[][] = [];
-    const size = 25;
-    for (let i = 0; i < listings.length; i += size) {
-      chunks.push(listings.slice(i, i + size));
+    for (let i = 0; i < listings.length; i += chunkSize) {
+      chunks.push(listings.slice(i, i + chunkSize));
     }
 
     const durations: Record<string, number> = {};
@@ -35,10 +44,7 @@ export async function POST(req: Request) {
 
       const row = j?.rows?.[0]?.elements || [];
       row.forEach((el: any, idx: number) => {
-        const sec =
-          el?.duration_in_traffic?.value ??
-          el?.duration?.value ??
-          null;
+        const sec = el?.duration_in_traffic?.value ?? el?.duration?.value ?? null;
         const mins = sec ? Math.round(sec / 60) : null;
         const id = chunk[idx].id;
         if (mins !== null && id) durations[id] = mins;
