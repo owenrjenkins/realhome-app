@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import dynamic from 'next/dynamic';
 import LoadingSpinner from '@/components/LoadingSpinner';
 import ErrorBanner from '@/components/ErrorBanner';
@@ -10,9 +10,26 @@ const Map = dynamic(() => import('@/components/Map'), { ssr: false });
 
 type Tile = { lat: number; lng: number; score: number; parts?: { commute:number; amenity:number; vibe:number } };
 
+// --- tiny parser for budget/beds from free text ---
+function parseClientPrefs(input: string) {
+  const t = (input || '').toLowerCase();
+  // budget: £900k / 1.1m / 700,000
+  let maxBudget: number | undefined;
+  const bud = t.match(/(?:budget|under|max)\s*£?\s*([\d,.]+)\s*(m|k)?/i);
+  if (bud) {
+    const base = Number(bud[1].replace(/[,£\s]/g, ''));
+    const unit = (bud[2] || '').toLowerCase();
+    maxBudget = unit === 'm' ? base * 1_000_000 : unit === 'k' ? base * 1_000 : base;
+  }
+  // beds: "3 bed(s)"
+  const bm = t.match(/(\d+)\s*(?:bed|beds|bedroom|bedrooms)/);
+  const beds = bm ? Number(bm[1]) : undefined;
+  return { maxBudget, beds };
+}
+
 export default function Page() {
   const [text, setText] = useState<string>(
-    'In London, quiet street near a big park, cafés and a good supermarket, within 45 minutes to City of London by transit.'
+    'Quiet street near a big park, cafés and a good supermarket, within 45 minutes to City of London by transit.'
   );
 
   const [center, setCenter] = useState<{lat:number;lng:number} | null>(null);
@@ -28,6 +45,17 @@ export default function Page() {
       .then(data => setListings(data))
       .catch(err => setErrMsg(`CSV load failed: ${err.message}`));
   }, []);
+
+  // filter listings by budget/beds parsed from prompt
+  const filteredListings = useMemo(() => {
+    if (!listings) return [];
+    const { maxBudget, beds } = parseClientPrefs(text);
+    return listings.filter((L) => {
+      const okBudget = maxBudget ? (L.price_gbp || 0) <= maxBudget : true;
+      const okBeds = beds ? (L.bedrooms || 0) >= beds : true;
+      return okBudget && okBeds;
+    });
+  }, [listings, text]);
 
   async function runSearch() {
     setErrMsg('');
@@ -73,7 +101,7 @@ export default function Page() {
           rows={4}
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder="e.g., In Manchester, 30 min to Piccadilly by transit, near a big park and cafés, quiet at night."
+          placeholder="e.g., In Manchester, 30 min to Piccadilly by transit, near a big park and cafés, quiet at night, 3 beds, budget £500k."
         />
         <button
           onClick={runSearch}
@@ -91,7 +119,7 @@ export default function Page() {
             <Map
               center={center}
               tiles={tiles.slice(0, parseInt(process.env.REALHOME_MAX_TILES || '140'))}
-              listings={(listings || []).slice(0, 300)}
+              listings={filteredListings.slice(0, 300)}  // <<< pass filtered listings to map
             />
           </div>
           <div className="space-y-3">
@@ -109,6 +137,23 @@ export default function Page() {
                 </li>
               ))}
             </ol>
+
+            {/* SIMPLE LISTINGS PANEL */}
+            <div className="pt-4">
+              <h2 className="text-lg font-medium">
+                Matching listings <span className="text-sm text-gray-500">({filteredListings.length})</span>
+              </h2>
+              <ul className="divide-y rounded-xl border">
+                {filteredListings.slice(0, 8).map((L) => (
+                  <li key={L.id} className="p-3 text-sm">
+                    <div className="font-medium">£{(L.price_gbp || 0).toLocaleString()}</div>
+                    <div className="text-gray-600">
+                      {L.bedrooms} bed {L.property_type} — {L.postcode}, {L.city}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
           </div>
         </div>
       )}
