@@ -2,11 +2,12 @@
   "name": "realhome",
   "version": "0.1.0",
   "private": true,
-  "scripts": {
-    "dev": "next dev --turbopack",
+ "scripts": {
+    "dev": "next dev",
+    "prebuild": "node scripts/build_uk_sales_dataset.js",
     "build": "next build --turbopack",
     "start": "next start",
-    "lint": "eslint"
+    "build:data": "node scripts/build_uk_sales_dataset.js"
   },
   "dependencies": {
     "@googlemaps/js-api-loader": "^1.16.10",
