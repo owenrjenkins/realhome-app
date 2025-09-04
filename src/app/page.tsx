@@ -16,12 +16,6 @@ type Tile = {
   parts?: { commute: number; amenity: number; vibe: number };
 };
 
-type Commute = {
-  address: string;
-  mode: "walking" | "bicycling" | "driving" | "transit";
-  maxMins: number;
-};
-
 // -------------------- helpers --------------------
 
 function distanceKm(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
@@ -34,56 +28,57 @@ function distanceKm(a: { lat: number; lng: number }, b: { lat: number; lng: numb
   return 2 * R * Math.asin(Math.sqrt(aa));
 }
 
-// parse "between 400k and 800k", "400k-800k", "budget 800k", and "3 beds"
-function parseClientPrefs(input: string) {
+// parse budget (range or max) and beds from free text
+function parseBudgetBeds(input: string) {
   const t = (input || "").toLowerCase().replace(/[,£]/g, "").replace(/\s+/g, " ");
-
   let minBudget: number | undefined;
   let maxBudget: number | undefined;
 
-  // between X and Y
   let m = t.match(/between\s*([\d.]+)\s*(m|k)?\s*(?:and|to|-)\s*([\d.]+)\s*(m|k)?/i);
   if (m) {
-    const a = Number(m[1]),
-      au = (m[2] || "").toLowerCase();
-    const b = Number(m[3]),
-      bu = (m[4] || "").toLowerCase();
+    const a = Number(m[1]), au = (m[2] || "").toLowerCase();
+    const b = Number(m[3]), bu = (m[4] || "").toLowerCase();
     const A = au === "m" ? a * 1_000_000 : au === "k" ? a * 1_000 : a;
     const B = bu === "m" ? b * 1_000_000 : bu === "k" ? b * 1_000 : b;
     minBudget = Math.min(A, B);
     maxBudget = Math.max(A, B);
   }
-
-  // X-Y
   if (!maxBudget) {
     m = t.match(/(\d+(?:\.\d+)?)\s*(m|k)?\s*-\s*(\d+(?:\.\d+)?)\s*(m|k)?/i);
     if (m) {
-      const a = Number(m[1]),
-        au = (m[2] || "").toLowerCase();
-      const b = Number(m[3]),
-        bu = (m[4] || "").toLowerCase();
+      const a = Number(m[1]), au = (m[2] || "").toLowerCase();
+      const b = Number(m[3]), bu = (m[4] || "").toLowerCase();
       const A = au === "m" ? a * 1_000_000 : au === "k" ? a * 1_000 : a;
       const B = bu === "m" ? b * 1_000_000 : bu === "k" ? b * 1_000 : b;
       minBudget = Math.min(A, B);
       maxBudget = Math.max(A, B);
     }
   }
-
-  // single max
   if (!maxBudget) {
     m = t.match(/(?:budget|under|max)\s*(\d+(?:\.\d+)?)\s*(m|k)?/i);
     if (m) {
-      const base = Number(m[1]),
-        u = (m[2] || "").toLowerCase();
+      const base = Number(m[1]), u = (m[2] || "").toLowerCase();
       maxBudget = u === "m" ? base * 1_000_000 : u === "k" ? base * 1_000 : base;
     }
   }
-
-  // beds
   const bm = t.match(/(\d+)\s*(?:bed|beds|bedroom|bedrooms)/i);
   const beds = bm ? Number(bm[1]) : undefined;
-
   return { minBudget, maxBudget, beds };
+}
+
+// naive commute minutes parser from text (fallback when /api/parse doesn't supply)
+function parseMaxMinsFromText(input: string) {
+  const m = (input || "").toLowerCase().match(/(\d+)\s*(?:min|mins|minutes)/);
+  return m ? Number(m[1]) : undefined;
+}
+
+// Make sure every listing has a stable id; if missing, build one.
+function ensureId(L: any) {
+  if (L.id) return String(L.id);
+  const lat = Number(L.latitude ?? L.lat ?? 0).toFixed(5);
+  const lng = Number(L.longitude ?? L.lng ?? 0).toFixed(5);
+  const price = Number(L.price_gbp ?? 0);
+  return `${lat},${lng},${price}`;
 }
 
 // -------------------- page --------------------
@@ -96,46 +91,87 @@ export default function Page() {
   const [center, setCenter] = useState<{ lat: number; lng: number } | null>(null);
   const [tiles, setTiles] = useState<Tile[]>([]);
   const [listings, setListings] = useState<MinimalListing[] | null>(null);
+
+  // commute minutes per listing id
   const [durations, setDurations] = useState<Record<string, number>>({});
+  // keep parsed request (if server returns details)
   const [parsed, setParsed] = useState<any>(null);
 
   const [loading, setLoading] = useState(false);
   const [errMsg, setErrMsg] = useState("");
 
-  // load CSV once
+  // 1) load CSV once
   useEffect(() => {
     loadListingsCsv()
       .then((data) => setListings(data))
       .catch((err) => setErrMsg(`CSV load failed: ${err.message}`));
   }, []);
 
-  // commute-aware, budget/beds-aware listing filter
+  // 2) compute filtered & scored listings (budget/beds + commute + proximity)
   const filteredListings = useMemo(() => {
     if (!listings || !center) return [];
-    const { minBudget, maxBudget, beds } = parseClientPrefs(text);
+    const { minBudget, maxBudget, beds } = parseBudgetBeds(text);
     const radiusKm = 25;
+    const maxMins = parsed?.commutes?.[0]?.maxMins ?? parseMaxMinsFromText(text) ?? 45;
 
-    return listings.filter((L) => {
-      const near = distanceKm(center, { lat: L.latitude, lng: L.longitude }) <= radiusKm;
+    return listings
+      .map((L: any) => {
+        const latitude = Number((L as any).latitude ?? (L as any).lat);
+        const longitude = Number((L as any).longitude ?? (L as any).lng);
+        const id = ensureId(L);
 
-      const price = L.price_gbp || 0;
-      const okMin = typeof minBudget === "number" ? price >= minBudget : true;
-      const okMax = typeof maxBudget === "number" ? price <= maxBudget : true;
-      const okBeds = typeof beds === "number" ? (L.bedrooms || 0) >= beds : true;
+        const near = distanceKm(center, { lat: latitude, lng: longitude }) <= radiusKm;
 
-      const mins = durations[L.id];
-      const maxMins = parsed?.commutes?.[0]?.maxMins ?? 45;
-      const okCommute = typeof mins === "number" ? mins <= maxMins : true; // don't hide before durations arrive
+        const price = Number((L as any).price_gbp) || 0;
+        const okMin = typeof minBudget === "number" ? price >= minBudget : true;
+        const okMax = typeof maxBudget === "number" ? price <= maxBudget : true;
+        const okBeds = typeof beds === "number" ? Number((L as any).bedrooms || 0) >= beds : true;
 
-      return near && okMin && okMax && okBeds && okCommute;
-    });
+        const mins = durations[id];
+        const okCommute = typeof mins === "number" ? mins <= maxMins : true;
+
+        // score for ordering in the list (simple heuristic)
+        const score = (okCommute ? 1 : 0) + (okBeds ? 0.5 : 0) + (okMax && okMin ? 0.5 : 0);
+
+        return {
+          ...L,
+          id,
+          latitude,
+          longitude,
+          price_gbp: price,
+          _mins: mins as number | undefined,
+          _score: score,
+        };
+      })
+      .filter((L: any) => {
+        if (!L || Number.isNaN(L.latitude) || Number.isNaN(L.longitude)) return false;
+        const near = distanceKm(center, { lat: L.latitude, lng: L.longitude }) <= 25;
+        const price = L.price_gbp;
+        const { minBudget, maxBudget, beds } = parseBudgetBeds(text);
+        const okMin = typeof minBudget === "number" ? price >= minBudget : true;
+        const okMax = typeof maxBudget === "number" ? price <= maxBudget : true;
+        const okBeds = typeof beds === "number" ? (L.bedrooms || 0) >= beds : true;
+        const maxMins = parsed?.commutes?.[0]?.maxMins ?? parseMaxMinsFromText(text) ?? 45;
+        const okCommute = typeof L._mins === "number" ? L._mins <= maxMins : true;
+        return near && okMin && okMax && okBeds && okCommute;
+      })
+      .sort((a: any, b: any) => {
+        // Prefer lower commute minutes then lower price
+        const am = typeof a._mins === "number" ? a._mins : 9999;
+        const bm = typeof b._mins === "number" ? b._mins : 9999;
+        if (am !== bm) return am - bm;
+        return (a.price_gbp || 0) - (b.price_gbp || 0);
+      });
   }, [listings, center, text, durations, parsed]);
 
+  // 3) main search: parse → score tiles → fetch commute minutes for nearby candidates
   async function runSearch() {
     setErrMsg("");
     setLoading(true);
+    setDurations({}); // reset between searches
+
     try {
-      // 1) parse the prompt on the server
+      // Parse prompt (server)
       const parsedRes = await fetch("/api/parse", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -145,7 +181,7 @@ export default function Page() {
       const parsedJson = await parsedRes.json();
       setParsed(parsedJson);
 
-      // 2) score tiles + get search center
+      // Score tiles + get center
       const scoreRes = await fetch("/api/score", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -159,16 +195,27 @@ export default function Page() {
       setCenter(json.center);
       setTiles(json.results || []);
 
-      // 3) get commute minutes for nearby candidate listings (quota-friendly)
+      // Commute durations for nearby candidates (quota friendly)
       if (listings && json.center) {
         const radiusKm = 25;
-        const nearby = listings.filter(
-          (L) => distanceKm(json.center, { lat: L.latitude, lng: L.longitude }) <= radiusKm
-        );
+        const nearby = listings
+          .map((L: any) => ({
+            ...L,
+            id: ensureId(L),
+            latitude: Number((L as any).latitude ?? (L as any).lat),
+            longitude: Number((L as any).longitude ?? (L as any).lng),
+          }))
+          .filter(
+            (L) =>
+              !Number.isNaN(L.latitude) &&
+              !Number.isNaN(L.longitude) &&
+              distanceKm(json.center, { lat: L.latitude, lng: L.longitude }) <= radiusKm
+          );
+
         const body = {
           origin: json.center,
           mode: parsedJson?.commutes?.[0]?.mode || "transit",
-          listings: nearby.slice(0, 200), // cap calls
+          listings: nearby.slice(0, 200).map((L) => ({ id: L.id, latitude: L.latitude, longitude: L.longitude })),
         };
 
         const cRes = await fetch("/api/commute", {
@@ -176,6 +223,7 @@ export default function Page() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
+
         if (cRes.ok) {
           const cj = await cRes.json();
           setDurations(cj.durations || {});
@@ -231,41 +279,20 @@ export default function Page() {
           </div>
 
           <div className="space-y-3">
-            <h2 className="text-lg font-medium">Top matches</h2>
+            <h2 className="text-lg font-medium">Top listings</h2>
             <ol className="space-y-2">
-              {tiles.slice(0, 12).map((r, i) => (
-                <li key={i} className="rounded-xl border p-3">
-                  <div className="font-medium">Score {(r.score * 100).toFixed(0)}%</div>
-                  {r.parts && (
-                    <div className="text-xs text-gray-600">
-                      Commute {(r.parts.commute * 100).toFixed(0)}% · Amenities {(r.parts.amenity * 100).toFixed(0)}%
-                    </div>
-                  )}
+              {filteredListings.slice(0, 12).map((L: any) => (
+                <li key={L.id} className="rounded-xl border p-3">
+                  <div className="font-medium">
+                    £{(L.price_gbp || 0).toLocaleString()} · {L.bedrooms} bed {L.property_type}
+                  </div>
                   <div className="text-xs text-gray-600">
-                    Lat {r.lat.toFixed(4)}, Lng {r.lng.toFixed(4)}
+                    {L.postcode}, {L.city}
+                    {typeof L._mins === "number" && <span> · Commute {L._mins} min</span>}
                   </div>
                 </li>
               ))}
             </ol>
-
-            <div className="pt-4">
-              <h2 className="text-lg font-medium">
-                Matching listings <span className="text-sm text-gray-500">({filteredListings.length})</span>
-              </h2>
-              <ul className="divide-y rounded-xl border">
-                {filteredListings.slice(0, 8).map((L) => (
-                  <li key={L.id} className="p-3 text-sm">
-                    <div className="font-medium">£{(L.price_gbp || 0).toLocaleString()}</div>
-                    <div className="text-gray-600">
-                      {L.bedrooms} bed {L.property_type} — {L.postcode}, {L.city}
-                      {typeof durations[L.id] === "number" && (
-                        <span className="ml-2">· Commute {durations[L.id]} min</span>
-                      )}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </div>
           </div>
         </div>
       )}
