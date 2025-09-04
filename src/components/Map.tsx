@@ -16,16 +16,22 @@ type Listing = {
 };
 type DurationMap = Record<string, number>;
 
+type MapController = {
+  focusOn: (id: string) => void;
+};
+
 export default function Map({
   center,
   listings = [],
   durations = {},
   onSelect,
+  onReady,
 }: {
   center: { lat: number; lng: number };
   listings?: Listing[];
   durations?: DurationMap;
   onSelect?: (l: Listing) => void;
+  onReady?: (ctl: MapController) => void; // let parent pan to markers
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const key = process.env.NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY as string | undefined;
@@ -50,6 +56,26 @@ export default function Map({
       });
 
       const info = new google.maps.InfoWindow();
+      const markers = new Map<string, google.maps.Marker>();
+
+      function openFor(L: Listing) {
+        const m = markers.get(L.id);
+        if (!m) return;
+        const commute = durations[L.id];
+        const commuteLine =
+          typeof commute === "number" ? `<div style="margin-top:4px;">Commute: ${commute} min</div>` : "";
+        info.setContent(`
+          <div style="min-width:220px">
+            <div style="font-weight:700; margin-bottom:4px; font-size:14px;">£${(L.price_gbp || 0).toLocaleString()}</div>
+            <div style="font-size:12px; color:#444;">
+              ${L.bedrooms} bed ${L.property_type}<br/>
+              ${L.postcode}, ${L.city}
+              ${commuteLine}
+            </div>
+          </div>
+        `);
+        info.open({ anchor: m, map });
+      }
 
       // Listing pins only
       listings.slice(0, 300).forEach((L) => {
@@ -58,28 +84,26 @@ export default function Map({
           position: { lat: L.latitude, lng: L.longitude },
           title: `${L.bedrooms} bed ${L.property_type}`,
         });
+        markers.set(L.id, m);
         m.addListener("click", () => {
-          const commute = durations[L.id];
-          const commuteLine =
-            typeof commute === "number"
-              ? `<div style="margin-top:4px;">Commute: ${commute} min</div>`
-              : "";
-          info.setContent(`
-            <div style="min-width:210px">
-              <div style="font-weight:600; margin-bottom:4px;">£${(L.price_gbp || 0).toLocaleString()}</div>
-              <div style="font-size:12px; color:#444;">
-                ${L.bedrooms} bed ${L.property_type}<br/>
-                ${L.postcode}, ${L.city}
-                ${commuteLine}
-              </div>
-            </div>
-          `);
-          info.open({ anchor: m, map });
+          openFor(L);
           onSelect?.(L);
         });
       });
-    });
-  }, [key, center.lat, center.lng, listings.length, durations, onSelect]);
 
-  return <div ref={ref} className="w-full h-[80vh] rounded-2xl border shadow-lg" />;
+      // expose controller to parent
+      onReady?.({
+        focusOn: (id: string) => {
+          const m = markers.get(id);
+          if (!m) return;
+          map.panTo(m.getPosition()!);
+          map.setZoom(Math.max(map.getZoom() || 12, 14));
+          const L = listings.find((x) => x.id === id);
+          if (L) openFor(L);
+        },
+      });
+    });
+  }, [key, center.lat, center.lng, listings, durations, onSelect, onReady]);
+
+  return <div ref={ref} className="w-full h-[80vh] rounded-2xl border shadow-lg bg-white" />;
 }
