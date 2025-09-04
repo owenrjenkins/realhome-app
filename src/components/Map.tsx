@@ -22,11 +22,13 @@ export default function Map({
   tiles = [],
   listings = [],
   durations = {},
+  onSelect,
 }: {
   center: { lat: number; lng: number };
   tiles?: Tile[];
   listings?: Listing[];
   durations?: DurationMap;
+  onSelect?: (l: Listing) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const key = process.env.NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY as string | undefined;
@@ -52,7 +54,7 @@ export default function Map({
 
       const info = new google.maps.InfoWindow();
 
-      // Heat bubbles via simple scalable SVG symbol
+      // Heat bubbles
       tiles.slice(0, 140).forEach((t) => {
         const size = Math.max(10, Math.round(t.score * 36));
         const color = t.score > 0.7 ? "#2ecc71" : t.score > 0.5 ? "#f1c40f" : "#e67e22";
@@ -73,7 +75,7 @@ export default function Map({
         });
       });
 
-      // Listing pins (clickable)
+      // Listing pins
       listings.slice(0, 300).forEach((L) => {
         const m = new google.maps.Marker({
           map,
@@ -87,7 +89,7 @@ export default function Map({
               ? `<div style="margin-top:4px;">Commute: ${commute} min</div>`
               : "";
           info.setContent(`
-            <div style="min-width:200px">
+            <div style="min-width:210px">
               <div style="font-weight:600; margin-bottom:4px;">£${(L.price_gbp || 0).toLocaleString()}</div>
               <div style="font-size:12px; color:#444;">
                 ${L.bedrooms} bed ${L.property_type}<br/>
@@ -97,10 +99,11 @@ export default function Map({
             </div>
           `);
           info.open({ anchor: m, map });
+          onSelect?.(L);
         });
       });
     });
-  }, [key, center.lat, center.lng, tiles.length, listings.length, durations]);
+  }, [key, center.lat, center.lng, tiles.length, listings.length, durations, onSelect]);
 
   return <div ref={ref} className="w-full h-[520px] rounded-2xl border" />;
 }
