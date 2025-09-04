@@ -4,7 +4,6 @@
 import { useEffect, useRef } from "react";
 import { Loader } from "@googlemaps/js-api-loader";
 
-type Tile = { lat: number; lng: number; score: number };
 type Listing = {
   id: string;
   latitude: number;
@@ -19,13 +18,11 @@ type DurationMap = Record<string, number>;
 
 export default function Map({
   center,
-  tiles = [],
   listings = [],
   durations = {},
   onSelect,
 }: {
   center: { lat: number; lng: number };
-  tiles?: Tile[];
   listings?: Listing[];
   durations?: DurationMap;
   onSelect?: (l: Listing) => void;
@@ -36,7 +33,7 @@ export default function Map({
   if (!key) {
     return (
       <div className="p-3 text-sm rounded-xl border bg-yellow-50 text-yellow-800">
-        Missing <code>NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY</code>. Add it in Vercel → Settings → Environment Variables, then redeploy.
+        Missing <code>NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY</code>.
       </div>
     );
   }
@@ -49,33 +46,12 @@ export default function Map({
         zoom: 12,
         mapTypeControl: false,
         streetViewControl: false,
-        fullscreenControl: false,
+        fullscreenControl: true,
       });
 
       const info = new google.maps.InfoWindow();
 
-      // Heat bubbles
-      tiles.slice(0, 140).forEach((t) => {
-        const size = Math.max(10, Math.round(t.score * 36));
-        const color = t.score > 0.7 ? "#2ecc71" : t.score > 0.5 ? "#f1c40f" : "#e67e22";
-        const svg = {
-          path: "M 0 0 m -1, 0 a 1,1 0 1,0 2,0 a 1,1 0 1,0 -2,0",
-          fillColor: color,
-          fillOpacity: 0.55,
-          scale: size,
-          strokeWeight: 0.8,
-          strokeColor: "rgba(0,0,0,0.15)",
-        } as google.maps.Symbol;
-
-        new google.maps.Marker({
-          map,
-          position: { lat: t.lat, lng: t.lng },
-          icon: svg,
-          clickable: false,
-        });
-      });
-
-      // Listing pins
+      // Listing pins only
       listings.slice(0, 300).forEach((L) => {
         const m = new google.maps.Marker({
           map,
@@ -103,7 +79,7 @@ export default function Map({
         });
       });
     });
-  }, [key, center.lat, center.lng, tiles.length, listings.length, durations, onSelect]);
+  }, [key, center.lat, center.lng, listings.length, durations, onSelect]);
 
-  return <div ref={ref} className="w-full h-[520px] rounded-2xl border" />;
+  return <div ref={ref} className="w-full h-[80vh] rounded-2xl border shadow-lg" />;
 }
