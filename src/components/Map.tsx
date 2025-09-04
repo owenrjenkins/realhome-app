@@ -52,7 +52,7 @@ export default function Map({
 
       const info = new google.maps.InfoWindow();
 
-      // Heat bubbles via scalable SVG symbol (simple and reliable)
+      // Heat bubbles via simple scalable SVG symbol
       tiles.slice(0, 140).forEach((t) => {
         const size = Math.max(10, Math.round(t.score * 36));
         const color = t.score > 0.7 ? "#2ecc71" : t.score > 0.5 ? "#f1c40f" : "#e67e22";
