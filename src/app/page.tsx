@@ -10,10 +10,8 @@ const Map = dynamic(() => import('@/components/Map'), { ssr: false });
 
 type Tile = { lat: number; lng: number; score: number; parts?: { commute:number; amenity:number; vibe:number } };
 
-// --- tiny parser for budget/beds from free text ---
 function parseClientPrefs(input: string) {
   const t = (input || '').toLowerCase();
-  // budget: £900k / 1.1m / 700,000
   let maxBudget: number | undefined;
   const bud = t.match(/(?:budget|under|max)\s*£?\s*([\d,.]+)\s*(m|k)?/i);
   if (bud) {
@@ -21,32 +19,25 @@ function parseClientPrefs(input: string) {
     const unit = (bud[2] || '').toLowerCase();
     maxBudget = unit === 'm' ? base * 1_000_000 : unit === 'k' ? base * 1_000 : base;
   }
-  // beds: "3 bed(s)"
   const bm = t.match(/(\d+)\s*(?:bed|beds|bedroom|bedrooms)/);
   const beds = bm ? Number(bm[1]) : undefined;
   return { maxBudget, beds };
 }
 
 export default function Page() {
-  const [text, setText] = useState<string>(
+  const [text, setText] = useState(
     'Quiet street near a big park, cafés and a good supermarket, within 45 minutes to City of London by transit.'
   );
-
-  const [center, setCenter] = useState<{lat:number;lng:number} | null>(null);
+  const [center, setCenter] = useState<{ lat: number; lng: number } | null>(null);
   const [tiles, setTiles] = useState<Tile[]>([]);
   const [listings, setListings] = useState<MinimalListing[] | null>(null);
-
   const [loading, setLoading] = useState(false);
-  const [errMsg, setErrMsg] = useState<string>('');
+  const [errMsg, setErrMsg] = useState('');
 
-  // Load CSV once
   useEffect(() => {
-    loadListingsCsv()
-      .then(data => setListings(data))
-      .catch(err => setErrMsg(`CSV load failed: ${err.message}`));
+    loadListingsCsv().then(setListings).catch((err) => setErrMsg(`CSV load failed: ${err.message}`));
   }, []);
 
-  // filter listings by budget/beds parsed from prompt
   const filteredListings = useMemo(() => {
     if (!listings) return [];
     const { maxBudget, beds } = parseClientPrefs(text);
@@ -61,22 +52,26 @@ export default function Page() {
     setErrMsg('');
     setLoading(true);
     try {
-      // parse then score
-      const parsedRes = await fetch('/api/parse', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+      const parsedRes = await fetch('/api/parse', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
       if (!parsedRes.ok) throw new Error(`Parse error (${parsedRes.status})`);
       const parsed = await parsedRes.json();
 
-      const scoreRes = await fetch('/api/score', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parsed }) });
+      const scoreRes = await fetch('/api/score', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parsed }),
+      });
       if (!scoreRes.ok) {
-        const j = await scoreRes.json().catch(()=> ({}));
+        const j = await scoreRes.json().catch(() => ({}));
         throw new Error(j?.error || `Score error (${scoreRes.status})`);
       }
       const json = await scoreRes.json();
       setCenter(json.center);
       setTiles(json.results || []);
-    } catch (e: unknown) {
-      const error = e as Error;
-      setErrMsg(error?.message || 'Something went wrong while scoring. Please try again.');
+    } catch (e: any) {
+      setErrMsg(e?.message || 'Something went wrong while scoring. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -88,7 +83,7 @@ export default function Page() {
         <h1 className="text-3xl font-semibold">RealHome</h1>
         <div className="flex items-center gap-2">
           {listings && <Badge>Listings loaded: {listings.length.toLocaleString()}</Badge>}
-          <Badge>Tiles cap: {process.env.REALHOME_MAX_TILES || 140}</Badge>
+          <Badge>Tiles cap: {process.env.NEXT_PUBLIC_TILES_CAP || process.env.REALHOME_MAX_TILES || 140}</Badge>
         </div>
       </div>
 
@@ -118,8 +113,8 @@ export default function Page() {
           <div>
             <Map
               center={center}
-              tiles={tiles.slice(0, parseInt(process.env.REALHOME_MAX_TILES || '140'))}
-              listings={filteredListings.slice(0, 300)}  // <<< pass filtered listings to map
+              tiles={tiles.slice(0, 140)}
+              listings={filteredListings.slice(0, 300)}
             />
           </div>
           <div className="space-y-3">
@@ -138,7 +133,6 @@ export default function Page() {
               ))}
             </ol>
 
-            {/* SIMPLE LISTINGS PANEL */}
             <div className="pt-4">
               <h2 className="text-lg font-medium">
                 Matching listings <span className="text-sm text-gray-500">({filteredListings.length})</span>
