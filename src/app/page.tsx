@@ -9,17 +9,11 @@ import { loadListingsCsv, type MinimalListing } from "@/lib/loadCsv";
 
 const Map = dynamic(() => import("@/components/Map"), { ssr: false });
 
-type Tile = {
-  lat: number;
-  lng: number;
-  score: number;
-  parts?: { commute: number; amenity: number; vibe: number };
-};
-
-// -------------------- helpers --------------------
+type Tile = { lat: number; lng: number; score: number; parts?: { commute: number; amenity: number; vibe: number } };
+type ListingExt = MinimalListing & { _mins?: number; id: string; latitude: number; longitude: number };
 
 function distanceKm(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
-  const R = 6371; // km
+  const R = 6371;
   const dLat = ((b.lat - a.lat) * Math.PI) / 180;
   const dLng = ((b.lng - a.lng) * Math.PI) / 180;
   const s1 = Math.sin(dLat / 2);
@@ -28,9 +22,8 @@ function distanceKm(a: { lat: number; lng: number }, b: { lat: number; lng: numb
   return 2 * R * Math.asin(Math.sqrt(aa));
 }
 
-// parse budget (range or max) and beds from free text
-function parseBudgetBeds(input: string) {
-  const t = (input || "").toLowerCase().replace(/[,£]/g, "").replace(/\s+/g, " ");
+function parseBudgetBeds(text: string) {
+  const t = (text || "").toLowerCase().replace(/[,£]/g, "").replace(/\s+/g, " ");
   let minBudget: number | undefined;
   let maxBudget: number | undefined;
 
@@ -66,13 +59,19 @@ function parseBudgetBeds(input: string) {
   return { minBudget, maxBudget, beds };
 }
 
-// naive commute minutes parser from text (fallback when /api/parse doesn't supply)
-function parseMaxMinsFromText(input: string) {
-  const m = (input || "").toLowerCase().match(/(\d+)\s*(?:min|mins|minutes)/);
-  return m ? Number(m[1]) : undefined;
+// fallback: parse minutes + destination name from text like "45 minutes to London Bridge Underground by transit"
+function parseCommuteFromText(text: string) {
+  const t = (text || "").toLowerCase();
+  const mins = Number((t.match(/(\d+)\s*(?:min|mins|minutes)/) || [])[1]) || 45;
+  // destination: take text between "to " and " by" if present
+  const destMatch = text.match(/to\s+(.+?)(?:\s+by|\s*[,.;]|$)/i);
+  const dest = destMatch?.[1]?.trim() || "City of London";
+  // mode
+  const mode = /walking/.test(t) ? "walking" : /bike|bicycl/.test(t) ? "bicycling" : /driv/.test(t) ? "driving" : "transit";
+  return { mins, dest, mode };
 }
 
-// Make sure every listing has a stable id; if missing, build one.
+// stable ID
 function ensureId(L: any) {
   if (L.id) return String(L.id);
   const lat = Number(L.latitude ?? L.lat ?? 0).toFixed(5);
@@ -81,111 +80,98 @@ function ensureId(L: any) {
   return `${lat},${lng},${price}`;
 }
 
-// -------------------- page --------------------
-
 export default function Page() {
   const [text, setText] = useState(
-    "Quiet street near a big park, cafés and a good supermarket, within 45 minutes to City of London by transit. 3 beds between £400,000 and £800,000."
+    "Quiet street near a big park, cafés and a good supermarket, 45 minutes to London Bridge Underground by transit. 3 beds between £400,000 and £800,000."
   );
 
   const [center, setCenter] = useState<{ lat: number; lng: number } | null>(null);
   const [tiles, setTiles] = useState<Tile[]>([]);
   const [listings, setListings] = useState<MinimalListing[] | null>(null);
 
-  // commute minutes per listing id
   const [durations, setDurations] = useState<Record<string, number>>({});
-  // keep parsed request (if server returns details)
-  const [parsed, setParsed] = useState<any>(null);
+  const [destination, setDestination] = useState<{ lat: number; lng: number; name: string } | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [errMsg, setErrMsg] = useState("");
 
-  // 1) load CSV once
+  // detail panel state
+  const [selected, setSelected] = useState<ListingExt | null>(null);
+  const [nearby, setNearby] = useState<{ park?: { name: string; distance_m: number }; supermarket?: { name: string; distance_m: number } } | null>(null);
+
   useEffect(() => {
     loadListingsCsv()
       .then((data) => setListings(data))
       .catch((err) => setErrMsg(`CSV load failed: ${err.message}`));
   }, []);
 
-  // 2) compute filtered & scored listings (budget/beds + commute + proximity)
+  // filtered listings (budget/beds + commute + proximity to center)
   const filteredListings = useMemo(() => {
     if (!listings || !center) return [];
     const { minBudget, maxBudget, beds } = parseBudgetBeds(text);
     const radiusKm = 25;
-    const maxMins = parsed?.commutes?.[0]?.maxMins ?? parseMaxMinsFromText(text) ?? 45;
+    const maxMins = parseCommuteFromText(text).mins;
 
     return listings
       .map((L: any) => {
-        const latitude = Number((L as any).latitude ?? (L as any).lat);
-        const longitude = Number((L as any).longitude ?? (L as any).lng);
+        const latitude = Number(L.latitude ?? L.lat);
+        const longitude = Number(L.longitude ?? L.lng);
         const id = ensureId(L);
-
-        const near = distanceKm(center, { lat: latitude, lng: longitude }) <= radiusKm;
-
-        const price = Number((L as any).price_gbp) || 0;
-        const okMin = typeof minBudget === "number" ? price >= minBudget : true;
-        const okMax = typeof maxBudget === "number" ? price <= maxBudget : true;
-        const okBeds = typeof beds === "number" ? Number((L as any).bedrooms || 0) >= beds : true;
-
         const mins = durations[id];
-        const okCommute = typeof mins === "number" ? mins <= maxMins : true;
-
-        // score for ordering in the list (simple heuristic)
-        const score = (okCommute ? 1 : 0) + (okBeds ? 0.5 : 0) + (okMax && okMin ? 0.5 : 0);
 
         return {
-          ...L,
+          ...(L as any),
           id,
           latitude,
           longitude,
-          price_gbp: price,
+          price_gbp: Number(L.price_gbp || 0),
           _mins: mins as number | undefined,
-          _score: score,
-        };
+        } as ListingExt;
       })
-      .filter((L: any) => {
-        if (!L || Number.isNaN(L.latitude) || Number.isNaN(L.longitude)) return false;
-        const near = distanceKm(center, { lat: L.latitude, lng: L.longitude }) <= 25;
-        const price = L.price_gbp;
-        const { minBudget, maxBudget, beds } = parseBudgetBeds(text);
+      .filter((L) => {
+        if (!Number.isFinite(L.latitude) || !Number.isFinite(L.longitude)) return false;
+        const near = distanceKm(center, { lat: L.latitude, lng: L.longitude }) <= radiusKm;
+        const price = L.price_gbp || 0;
         const okMin = typeof minBudget === "number" ? price >= minBudget : true;
         const okMax = typeof maxBudget === "number" ? price <= maxBudget : true;
-        const okBeds = typeof beds === "number" ? (L.bedrooms || 0) >= beds : true;
-        const maxMins = parsed?.commutes?.[0]?.maxMins ?? parseMaxMinsFromText(text) ?? 45;
-        const okCommute = typeof L._mins === "number" ? L._mins <= maxMins : true;
+        const okBeds = typeof (L as any).bedrooms === "number" ? (L as any).bedrooms >= (parseBudgetBeds(text).beds ?? 0) : true;
+        const okCommute = typeof L._mins === "number" ? L._mins <= maxMins : true; // don't hide before durations arrive
         return near && okMin && okMax && okBeds && okCommute;
       })
-      .sort((a: any, b: any) => {
-        // Prefer lower commute minutes then lower price
+      .sort((a, b) => {
         const am = typeof a._mins === "number" ? a._mins : 9999;
         const bm = typeof b._mins === "number" ? b._mins : 9999;
         if (am !== bm) return am - bm;
         return (a.price_gbp || 0) - (b.price_gbp || 0);
       });
-  }, [listings, center, text, durations, parsed]);
+  }, [listings, center, text, durations]);
 
-  // 3) main search: parse → score tiles → fetch commute minutes for nearby candidates
   async function runSearch() {
     setErrMsg("");
     setLoading(true);
-    setDurations({}); // reset between searches
+    setDurations({});
+    setSelected(null);
+    setNearby(null);
 
     try {
-      // Parse prompt (server)
-      const parsedRes = await fetch("/api/parse", {
+      // 1) parse destination & mode from text (fallback method)
+      const { dest, mode } = parseCommuteFromText(text);
+
+      // 2) geocode destination to lat/lng
+      const g = await fetch("/api/geocode", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ query: dest }),
       });
-      if (!parsedRes.ok) throw new Error(`Parse error (${parsedRes.status})`);
-      const parsedJson = await parsedRes.json();
-      setParsed(parsedJson);
+      if (!g.ok) throw new Error("Failed to geocode destination");
+      const gjson = await g.json();
+      setDestination({ lat: gjson.lat, lng: gjson.lng, name: gjson.name || dest });
 
-      // Score tiles + get center
+      // 3) score areas -> we still let the server decide an overall center to display (e.g., area centroid)
       const scoreRes = await fetch("/api/score", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ parsed: parsedJson }),
+        body: JSON.stringify({ parsed: { destination: { lat: gjson.lat, lng: gjson.lng, mode } } }),
       });
       if (!scoreRes.ok) {
         const j = await scoreRes.json().catch(() => ({}));
@@ -195,33 +181,31 @@ export default function Page() {
       setCenter(json.center);
       setTiles(json.results || []);
 
-      // Commute durations for nearby candidates (quota friendly)
-      if (listings && json.center) {
+      // 4) batch commute minutes for nearby candidates (quota friendly)
+      if (listings) {
         const radiusKm = 25;
         const nearby = listings
           .map((L: any) => ({
             ...L,
             id: ensureId(L),
-            latitude: Number((L as any).latitude ?? (L as any).lat),
-            longitude: Number((L as any).longitude ?? (L as any).lng),
+            latitude: Number(L.latitude ?? L.lat),
+            longitude: Number(L.longitude ?? L.lng),
           }))
           .filter(
             (L) =>
-              !Number.isNaN(L.latitude) &&
-              !Number.isNaN(L.longitude) &&
+              Number.isFinite(L.latitude) &&
+              Number.isFinite(L.longitude) &&
               distanceKm(json.center, { lat: L.latitude, lng: L.longitude }) <= radiusKm
           );
-
-        const body = {
-          origin: json.center,
-          mode: parsedJson?.commutes?.[0]?.mode || "transit",
-          listings: nearby.slice(0, 200).map((L) => ({ id: L.id, latitude: L.latitude, longitude: L.longitude })),
-        };
 
         const cRes = await fetch("/api/commute", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
+          body: JSON.stringify({
+            origin: { lat: gjson.lat, lng: gjson.lng }, // destination/work
+            mode,
+            listings: nearby.slice(0, 200).map((L) => ({ id: L.id, latitude: L.latitude, longitude: L.longitude })),
+          }),
         });
 
         if (cRes.ok) {
@@ -230,11 +214,27 @@ export default function Page() {
         }
       }
     } catch (e: any) {
-      setErrMsg(e?.message || "Something went wrong while scoring. Please try again.");
+      setErrMsg(e?.message || "Search failed");
     } finally {
       setLoading(false);
     }
   }
+
+  // when a listing is clicked (on the map or in the list)
+  async function openDetails(L: ListingExt) {
+    setSelected(L);
+    setNearby(null);
+    try {
+      const res = await fetch("/api/nearby", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lat: L.latitude, lng: L.longitude }),
+      });
+      if (res.ok) setNearby(await res.json());
+    } catch {}
+  }
+
+  const maxMinsText = parseCommuteFromText(text).mins;
 
   return (
     <main className="max-w-5xl mx-auto p-6 space-y-6">
@@ -255,16 +255,12 @@ export default function Page() {
           rows={4}
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder="e.g., In Manchester, 30 min to Piccadilly by transit, near a big park and cafés, quiet at night, 3 beds, between £400k and £800k."
+          placeholder="e.g., 45 minutes to London Bridge Underground by transit, 3 beds, between £400k and £800k, near a big park and supermarket."
         />
-        <button
-          onClick={runSearch}
-          disabled={loading}
-          className="rounded-xl px-4 py-2 bg-black text-white disabled:opacity-60"
-        >
+        <button onClick={runSearch} disabled={loading} className="rounded-xl px-4 py-2 bg-black text-white disabled:opacity-60">
           {loading ? "Finding areas…" : "Find areas"}
         </button>
-        {loading && <LoadingSpinner label="Scoring candidate areas & checking commute…" />}
+        {loading && <LoadingSpinner label="Scoring areas & checking commute…" />}
       </div>
 
       {center && (
@@ -275,14 +271,15 @@ export default function Page() {
               tiles={tiles.slice(0, 140)}
               listings={filteredListings.slice(0, 300)}
               durations={durations}
+              onSelect={(l) => openDetails(l as ListingExt)}
             />
           </div>
 
           <div className="space-y-3">
             <h2 className="text-lg font-medium">Top listings</h2>
             <ol className="space-y-2">
-              {filteredListings.slice(0, 12).map((L: any) => (
-                <li key={L.id} className="rounded-xl border p-3">
+              {filteredListings.slice(0, 12).map((L) => (
+                <li key={L.id} className="rounded-xl border p-3 hover:bg-gray-50 cursor-pointer" onClick={() => openDetails(L)}>
                   <div className="font-medium">
                     £{(L.price_gbp || 0).toLocaleString()} · {L.bedrooms} bed {L.property_type}
                   </div>
@@ -293,6 +290,76 @@ export default function Page() {
                 </li>
               ))}
             </ol>
+          </div>
+        </div>
+      )}
+
+      {/* Details panel */}
+      {selected && (
+        <div className="fixed inset-0 bg-black/40 flex items-end md:items-center justify-center z-50" onClick={() => setSelected(null)}>
+          <div className="bg-white w-full md:max-w-xl rounded-t-2xl md:rounded-2xl p-5 space-y-3" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Listing details</h3>
+              <button className="text-sm px-3 py-1 rounded-lg border" onClick={() => setSelected(null)}>
+                Close
+              </button>
+            </div>
+            <div className="text-sm">
+              <div className="font-medium">
+                £{(selected.price_gbp || 0).toLocaleString()} · {selected.bedrooms} bed {selected.property_type}
+              </div>
+              <div className="text-gray-600">
+                {selected.postcode}, {selected.city}
+                {typeof selected._mins === "number" && destination && (
+                  <span>
+                    {" "}
+                    · Commute to <strong>{destination.name}</strong>: {selected._mins} min
+                  </span>
+                )}
+              </div>
+
+              <div className="mt-3">
+                <div className="font-medium">Nearby</div>
+                <ul className="list-disc list-inside text-gray-700">
+                  <li>
+                    Park:{" "}
+                    {nearby?.park ? (
+                      <>
+                        {nearby.park.name} ({nearby.park.distance_m} m)
+                      </>
+                    ) : (
+                      "searching…"
+                    )}
+                  </li>
+                  <li>
+                    Supermarket:{" "}
+                    {nearby?.supermarket ? (
+                      <>
+                        {nearby.supermarket.name} ({nearby.supermarket.distance_m} m)
+                      </>
+                    ) : (
+                      "searching…"
+                    )}
+                  </li>
+                </ul>
+              </div>
+
+              <div className="mt-3">
+                <div className="font-medium">Why this matches</div>
+                <ul className="list-disc list-inside text-gray-700">
+                  {typeof selected._mins === "number" && (
+                    <li>
+                      Commute ≤ {maxMinsText} min ({selected._mins} min)
+                    </li>
+                  )}
+                  <li>
+                    Bedrooms: {selected.bedrooms} (meets your minimum)
+                  </li>
+                  <li>Budget satisfied (price shown above)</li>
+                  <li>Near park & supermarket (see Nearby)</li>
+                </ul>
+              </div>
+            </div>
           </div>
         </div>
       )}
