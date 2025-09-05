@@ -1,51 +1,78 @@
 import { NextResponse } from "next/server";
 
-const KEY = process.env.GOOGLE_MAPS_SERVER_KEY!;
+const API_KEY = process.env.GOOGLE_MAPS_SERVER_KEY as string;
 
-/**
- * POST /api/nearby
- * Body: { lat: number, lng: number, radius?: number }
- * Returns: {
- *   park?: { name: string, distance_m: number },
- *   supermarket?: { name: string, distance_m: number }
- * }
- */
+type NearbyResult = {
+  name: string;
+  distance_m: number;
+};
+
+function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+  const R = 6371000;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const s1 = Math.sin(dLat / 2);
+  const s2 = Math.sin(dLng / 2);
+  const aa =
+    s1 * s1 +
+    Math.cos((a.lat * Math.PI) / 180) * Math.cos((b.lat * Math.PI) / 180) * s2 * s2;
+  return 2 * R * Math.asin(Math.sqrt(aa));
+}
+
+async function findOneType(lat: number, lng: number, type: "park" | "supermarket"): Promise<NearbyResult | null> {
+  const url = new URL("https://maps.googleapis.com/maps/api/place/nearbysearch/json");
+  url.searchParams.set("location", `${lat},${lng}`);
+  url.searchParams.set("radius", "1500"); // ~1.5km
+  url.searchParams.set("type", type);
+  url.searchParams.set("key", API_KEY);
+
+  const res = await fetch(url.toString());
+  if (!res.ok) return null;
+  const data = await res.json();
+
+  const items = (data?.results || []).filter((r: any) => Array.isArray(r.types) && r.types.includes(type));
+  if (!items.length) return null;
+
+  // Prefer higher rating, then closer
+  items.sort((a: any, b: any) => {
+    const ra = a.rating ?? 0, rb = b.rating ?? 0;
+    if (rb !== ra) return rb - ra;
+    const da = haversineMeters({ lat, lng }, { lat: a.geometry.location.lat, lng: a.geometry.location.lng });
+    const db = haversineMeters({ lat, lng }, { lat: b.geometry.location.lat, lng: b.geometry.location.lng });
+    return da - db;
+  });
+
+  const top = items[0];
+  return {
+    name: top.name,
+    distance_m: Math.round(
+      haversineMeters({ lat, lng }, { lat: top.geometry.location.lat, lng: top.geometry.location.lng })
+    ),
+  };
+}
+
 export async function POST(req: Request) {
   try {
-    const { lat, lng, radius = 1200 } = await req.json();
-    if (typeof lat !== "number" || typeof lng !== "number") throw new Error("missing_lat_lng");
-
-    async function topPlace(type: string) {
-      const url =
-        "https://maps.googleapis.com/maps/api/place/nearbysearch/json?key=" +
-        KEY +
-        `&location=${lat},${lng}&radius=${radius}&type=${encodeURIComponent(type)}`;
-      const res = await fetch(url);
-      const j = await res.json();
-      const item = j?.results?.[0];
-      if (!item) return undefined;
-
-      // Distance Matrix to get walking distance/time is overkill for now; use straight-line distance
-      function haversine(lat1: number, lng1: number, lat2: number, lng2: number) {
-        const R = 6371000;
-        const dLat = ((lat2 - lat1) * Math.PI) / 180;
-        const dLng = ((lng2 - lng1) * Math.PI) / 180;
-        const a =
-          Math.sin(dLat / 2) ** 2 +
-          Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
-        return 2 * R * Math.asin(Math.sqrt(a));
-      }
-
-      const p = item.geometry?.location;
-      const dist = p ? Math.round(haversine(lat, lng, p.lat, p.lng)) : undefined;
-
-      return { name: item.name, distance_m: dist };
+    if (!API_KEY) {
+      return NextResponse.json({ error: "Server Places key is missing" }, { status: 500 });
+    }
+    const body = await req.json();
+    const lat = Number(body?.lat);
+    const lng = Number(body?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return NextResponse.json({ error: "Invalid coordinates" }, { status: 400 });
     }
 
-    const [park, supermarket] = await Promise.all([topPlace("park"), topPlace("supermarket")]);
+    const [park, supermarket] = await Promise.all([
+      findOneType(lat, lng, "park"),
+      findOneType(lat, lng, "supermarket"),
+    ]);
 
-    return NextResponse.json({ park, supermarket });
+    return NextResponse.json({
+      park: park || null,
+      supermarket: supermarket || null,
+    });
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "nearby_failed" }, { status: 500 });
+    return NextResponse.json({ error: e?.message || "Nearby failed" }, { status: 500 });
   }
 }
