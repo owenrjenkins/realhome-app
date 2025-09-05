@@ -21,7 +21,7 @@ type Listing = {
   property_type: string;
   postcode?: string;
   city?: string;
-  _mins?: number;      // minutes (optional, precomputed)
+  _mins?: number;      // precomputed minutes (optional)
   _isStrong?: boolean; // precomputed upstream
 };
 
@@ -38,11 +38,11 @@ export default function Map({
   center,
   listings,
   durations,
-  // NOTE: we intentionally IGNORE maxPins to avoid accidental caps
+  // keep prop but ignore it by default to avoid caps
   maxPins, // eslint-disable-line @typescript-eslint/no-unused-vars
   onSelect,
   onReady,
-  // NEW (optional) for evidence/amenities/route
+  // optional extras
   filters,
   amenityQueryText,
   mode = "transit",
@@ -55,7 +55,7 @@ export default function Map({
   onSelect: (l: Listing) => void;
   onReady?: (ctl: MapController) => void;
   filters?: Filters;
-  amenityQueryText?: string; // free-text like "near a primary school, tube, GP"
+  amenityQueryText?: string;
   mode?: "driving" | "transit" | "walking" | "bicycling";
   maxMins?: number;
 }) {
@@ -75,7 +75,7 @@ export default function Map({
 
   const safeCenter = useMemo<LatLng | null>(() => (isValidLatLng(center) ? center : null), [center]);
 
-  // KEEP ALL valid pins (NO slicing). Only drop invalid coords.
+  // keep ALL valid pins (no slicing)
   const safeListings = useMemo(() => {
     return (listings || []).filter(
       (L) =>
@@ -108,7 +108,7 @@ export default function Map({
     }
   };
 
-  // ---------- Amenity parsing ----------
+  // ---------- amenity parsing ----------
   const AMENITY_KEYWORDS: Record<string, google.maps.places.PlaceType[]> = {
     "nursery": ["school"], "primary school": ["school"], "secondary school": ["school"], "school": ["school"], "university": ["university"],
     "gp": ["doctor"], "doctor": ["doctor"], "hospital": ["hospital"], "pharmacy": ["pharmacy"], "chemist": ["pharmacy"], "dentist": ["dentist"], "vet": ["veterinary_care"],
@@ -139,7 +139,7 @@ export default function Map({
     const lc = amenityQueryText.toLowerCase();
     const out: google.maps.places.PlaceType[] = [];
     for (const [key, types] of Object.entries(AMENITY_KEYWORDS)) {
-      if (lc.includes(key)) types.forEach(t => { if (!out.includes(t)) out.push(t); });
+      if (lc.includes(key)) types.forEach((t) => { if (!out.includes(t)) out.push(t); });
     }
     return out;
   }, [amenityQueryText]);
@@ -166,7 +166,7 @@ export default function Map({
     const loader = new Loader({
       apiKey,
       version: "weekly",
-      libraries: ["places", "geometry"], // needed for Nearby + spherical distances
+      libraries: ["places", "geometry"], // Nearby + geometry distances
     });
 
     loader
@@ -210,10 +210,9 @@ export default function Map({
       });
   }, [safeCenter, onReady]);
 
-  // ---------- InfoWindow HTML ----------
+  // ---------- build InfoWindow HTML (with evidence) ----------
   function buildInfoHTML(L: Listing) {
     const mins = Number.isFinite(durations[L.id]) ? durations[L.id] : (typeof L._mins === "number" ? L._mins : undefined);
-
     const commuteLine =
       mins != null
         ? `<li>Commute ≤ ${maxMins} min — ${Math.round(mins) <= maxMins ? "✓" : "✗"} (this is ${Math.round(mins)} min by ${mode})</li>`
@@ -237,19 +236,21 @@ export default function Map({
         : "",
     ].join("");
 
-    // Nearby evidence ONLY for requested categories
-    const amenityLines = requestedAmenityTypes
-      .map((type) => {
-        const hit = nearby[type];
-        const limit = DEFAULT_AMENITY_THRESHOLDS[type] ?? 1500;
-        if (hit) {
-          const pass = hit.meters <= limit ? "✓" : "✗";
-          const name = hit.name ? ` ${hit.name}` : " place";
-          return `<li>${type.replaceAll("_", " ")} ≤ ${limit} m — ${pass} (nearest${name} at ${Math.round(hit.meters)} m)</li>`;
-        }
-        return `<li>${type.replaceAll("_", " ")} — searching…</li>`;
-      })
-      .join("");
+    const amenityLines =
+      requestedAmenityTypes.length > 0
+        ? requestedAmenityTypes
+            .map((type) => {
+              const hit = nearby[type];
+              const limit = DEFAULT_AMENITY_THRESHOLDS[type] ?? 1500;
+              if (hit) {
+                const pass = hit.meters <= limit ? "✓" : "✗";
+                const name = hit.name ? ` ${hit.name}` : " place";
+                return `<li>${type.replaceAll("_", " ")} ≤ ${limit} m — ${pass} (nearest${name} at ${Math.round(hit.meters)} m)</li>`;
+              }
+              return `<li>${type.replaceAll("_", " ")} — searching…</li>`;
+            })
+            .join("")
+        : "";
 
     return `
       <div style="font-size:12px;line-height:1.4;min-width:280px;">
@@ -260,100 +261,98 @@ export default function Map({
           ${priceLines}
           ${bedLines}
           ${commuteLine}
-          ${requestedAmenityTypes.length > 0 ? amenityLines : ""}
+          ${amenityLines}
         </ul>
       </div>
     `;
   }
 
-  // ---------- Directions polyline with timeouts + fallbacks ----------
-function drawRoute(from: LatLng | null, to: LatLng, preferred: "driving"|"transit"|"walking"|"bicycling") {
-  if (!mapRef.current || !directionsRendererRef.current || !from) return;
+  // ---------- Directions (polyline) with timeout + fallbacks ----------
+  function drawRoute(from: LatLng | null, to: LatLng, preferred: "driving" | "transit" | "walking" | "bicycling") {
+    if (!mapRef.current || !directionsRendererRef.current || !from) return;
 
-  const svc = new google.maps.DirectionsService();
-  const tryModes: google.maps.TravelMode[] = Array.from(new Set([
-    preferred === "walking" ? google.maps.TravelMode.WALKING
-    : preferred === "bicycling" ? google.maps.TravelMode.BICYCLING
-    : preferred === "transit" ? google.maps.TravelMode.TRANSIT
-    : google.maps.TravelMode.DRIVING,
-    google.maps.TravelMode.DRIVING,
-    google.maps.TravelMode.WALKING,
-  ]));
+    const svc = new google.maps.DirectionsService();
+    const tryModes: google.maps.TravelMode[] = Array.from(
+      new Set<google.maps.TravelMode>([
+        travelModeToGoogle(preferred),
+        google.maps.TravelMode.DRIVING,
+        google.maps.TravelMode.WALKING,
+      ])
+    );
 
-  (async () => {
-    for (const m of tryModes) {
-      const req: google.maps.DirectionsRequest = {
-        origin: new google.maps.LatLng(from.lat, from.lng),
-        destination: new google.maps.LatLng(to.lat, to.lng),
-        travelMode: m,
-        ...(m === google.maps.TravelMode.TRANSIT ? { transitOptions: { departureTime: new Date() } } : {}),
-      };
+    (async () => {
+      for (const m of tryModes) {
+        const req: google.maps.DirectionsRequest = {
+          origin: new google.maps.LatLng(from.lat, from.lng),
+          destination: new google.maps.LatLng(to.lat, to.lng),
+          travelMode: m,
+          ...(m === google.maps.TravelMode.TRANSIT ? { transitOptions: { departureTime: new Date() } } : {}),
+        };
 
-      const { res, status } = await new Promise<{res?: google.maps.DirectionsResult, status: google.maps.DirectionsStatus}>((resolve) => {
-        let timedOut = false;
-        const t = setTimeout(() => { timedOut = true; resolve({ status: google.maps.DirectionsStatus.INVALID_REQUEST }); }, 9000);
-        svc.route(req, (r, s) => { if (!timedOut) { clearTimeout(t); resolve({ res: r || undefined, status: s }); } });
-      });
+        const { res, status } = await new Promise<{res?: google.maps.DirectionsResult; status: google.maps.DirectionsStatus}>((resolve) => {
+          let timedOut = false;
+          const t = setTimeout(() => { timedOut = true; resolve({ status: google.maps.DirectionsStatus.INVALID_REQUEST }); }, 9000);
+          svc.route(req, (r, s) => { if (!timedOut) { clearTimeout(t); resolve({ res: r || undefined, status: s }); } });
+        });
 
-      console.warn("[Directions] status:", status, "mode:", m); // <-- watch this in console
+        // Log real status so config issues (REQUEST_DENIED) are visible
+        console.warn("[Directions] status:", status, "mode:", m);
 
-      if (status === google.maps.DirectionsStatus.OK && res?.routes?.length) {
-        directionsRendererRef.current!.setDirections(res);
-        return;
+        if (status === google.maps.DirectionsStatus.OK && res?.routes?.length) {
+          directionsRendererRef.current!.setDirections(res);
+          return;
+        }
       }
-    }
-    directionsRendererRef.current!.setDirections({ routes: [] } as any);
-  })();
-}
+      directionsRendererRef.current!.setDirections({ routes: [] } as any);
+    })();
+  }
 
-// When a marker is clicked:
-if (safeCenter) drawRoute(safeCenter, { lat: pos.lat, lng: pos.lng }, mode);
-
-  // ---------- Nearby fetch (only for requested categories) ----------
+  // ---------- Nearby (requested categories only) ----------
   async function fetchNearbyFor(L: Listing) {
     if (!mapRef.current || requestedAmenityTypes.length === 0) return;
-    setNearby({}); // reset for new selection
+    setNearby({}); // reset
     const svc = new google.maps.places.PlacesService(mapRef.current);
     const origin = { lat: L.latitude, lng: L.longitude };
 
-    const tasks = requestedAmenityTypes.map((type) =>
-      new Promise<void>((resolve) => {
-        const timer = setTimeout(() => resolve(), 6000); // timeout -> no result
-        svc.nearbySearch(
-          { location: origin as any, radius: 1500, type },
-          (results, status) => {
-            clearTimeout(timer);
-            if (status === google.maps.places.PlacesServiceStatus.OK && results?.[0]) {
-              const r = results[0];
-              const meters = r.geometry?.location
-                ? google.maps.geometry.spherical.computeDistanceBetween(
-                    new google.maps.LatLng(origin.lat, origin.lng),
-                    r.geometry.location
-                  )
-                : undefined;
-              if (typeof meters === "number") {
-                setNearby((prev) => ({ ...prev, [type]: { meters, name: r.name } }));
+    const tasks = requestedAmenityTypes.map(
+      (type) =>
+        new Promise<void>((resolve) => {
+          const timer = setTimeout(() => resolve(), 6000);
+          svc.nearbySearch(
+            { location: origin as any, radius: 1500, type },
+            (results, status) => {
+              clearTimeout(timer);
+              if (status === google.maps.places.PlacesServiceStatus.OK && results?.[0]) {
+                const r = results[0];
+                const meters = r.geometry?.location
+                  ? google.maps.geometry.spherical.computeDistanceBetween(
+                      new google.maps.LatLng(origin.lat, origin.lng),
+                      r.geometry.location
+                    )
+                  : undefined;
+                if (typeof meters === "number") {
+                  setNearby((prev) => ({ ...prev, [type]: { meters, name: r.name } }));
+                }
               }
+              resolve();
             }
-            resolve();
-          }
-        );
-      })
+          );
+        })
     );
 
     await Promise.all(tasks);
-    // refresh info window content if still open for this listing
+    // refresh info window if still open on same marker
     const mk = markersRef.current[L.id];
     if (mk && infoRef.current?.get("anchor") === mk) {
       infoRef.current.setContent(buildInfoHTML(L));
     }
   }
 
-  // ---------- draw / update markers whenever listings change ----------
+  // ---------- draw / update markers ----------
   useEffect(() => {
     if (!mapRef.current || !clustererRef.current) return;
 
-    // remove stale markers
+    // remove stale
     const keep: Record<string, true> = {};
     for (const L of safeListings) keep[L.id] = true;
     for (const id of Object.keys(markersRef.current)) {
@@ -366,33 +365,38 @@ if (safeCenter) drawRoute(safeCenter, { lat: pos.lat, lng: pos.lng }, mode);
     // reset clusterer
     clustererRef.current.clearMarkers();
 
-    // add markers (batched to keep UI smooth)
     const newMarkers: google.maps.Marker[] = [];
+
     for (const L of safeListings) {
       const pos: LatLng = { lat: Number(L.latitude), lng: Number(L.longitude) };
       if (!isValidLatLng(pos)) continue;
 
       const strong = !!L._isStrong;
       let marker = markersRef.current[L.id];
+
       if (!marker) {
         marker = new google.maps.Marker({
           position: pos,
           title: `${L.bedrooms} bed ${L.property_type} · £${(L.price_gbp || 0).toLocaleString()}`,
           icon: iconFor(strong),
         });
-        // Click handler
+
         marker.addListener("click", () => {
           onSelect(L);
 
-          // Open info with initial evidence (amenities may show "searching…" until loaded)
+          // Info window (amenities may still say "searching…" initially)
           infoRef.current?.setContent(buildInfoHTML(L));
-          infoRef.current?.open({ map: mapRef.current!, anchor: marker });
+          infoRef.current?.open({ map: mapRef.current!, anchor: marker! });
 
-          // Nearby (only if requested in free text)
-          if (requestedAmenityTypes.length > 0) fetchNearbyFor(L).catch(() => {});
+          // Nearby (only if requested)
+          if (requestedAmenityTypes.length > 0) {
+            fetchNearbyFor(L).catch(() => {});
+          }
 
-          // Route polyline: from current center (origin) -> listing
-          if (safeCenter) drawRoute(safeCenter, { lat: pos.lat, lng: pos.lng }, mode).catch(() => {});
+          // Route polyline: from map center (origin) -> listing position
+          if (safeCenter) {
+            drawRoute(safeCenter, pos, mode);
+          }
         });
 
         markersRef.current[L.id] = marker;
@@ -401,23 +405,21 @@ if (safeCenter) drawRoute(safeCenter, { lat: pos.lat, lng: pos.lng }, mode);
         marker.setTitle(`${L.bedrooms} bed ${L.property_type} · £${(L.price_gbp || 0).toLocaleString()}`);
         marker.setIcon(iconFor(strong));
       }
+
       newMarkers.push(marker);
     }
 
-    // add to clusterer
-    if ("addMarkers" in clustererRef.current! && typeof clustererRef.current!.addMarkers === "function") {
+    if ("addMarkers" in (clustererRef.current as any) && typeof clustererRef.current!.addMarkers === "function") {
       clustererRef.current!.addMarkers!(newMarkers);
     } else {
-      // fallback for older markerclusterer API
       newMarkers.forEach((m) => clustererRef.current!.addMarker(m));
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [safeListings, durations, onSelect, requestedAmenityTypes.length, mode, safeCenter?.lat, safeCenter?.lng]);
 
-  // keep center in sync
+  // keep center in sync & clear polyline when origin changes
   useEffect(() => {
     if (mapRef.current && safeCenter) mapRef.current.setCenter(safeCenter);
-    // also clear route when origin changes
     if (directionsRendererRef.current) directionsRendererRef.current.setDirections({ routes: [] } as any);
   }, [safeCenter?.lat, safeCenter?.lng]);
 
@@ -443,7 +445,7 @@ if (safeCenter) drawRoute(safeCenter, { lat: pos.lat, lng: pos.lng }, mode);
       className="w-full h-[520px] rounded-xl border bg-gray-50"
       style={{ minHeight: 400, position: "relative" }}
     >
-      {/* DEBUG HUD — helps verify no cap; remove for prod */}
+      {/* DEBUG HUD — remove for prod */}
       <div
         style={{
           position: "absolute",
@@ -461,7 +463,7 @@ if (safeCenter) drawRoute(safeCenter, { lat: pos.lat, lng: pos.lng }, mode);
       >
         <div><strong>Debug</strong></div>
         <div>pins rendered: {safeListings.length}</div>
-        <div>requested amenities: {requestedAmenityTypes.join(", ") || "none"}</div>
+        <div>amenities requested: {requestedAmenityTypes.join(", ") || "none"}</div>
         <div>nearby found: {
           Object.keys(nearby).length
             ? Object.entries(nearby).map(([k,v]) => `${k}:${v?.meters ? Math.round(v.meters)+"m" : "—"}`).join(" | ")
