@@ -3,6 +3,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader } from "@googlemaps/js-api-loader";
 
+// We import markerclusterer dynamically after the Maps JS is ready.
+type MarkerClustererCtor = new (opts: { markers?: google.maps.Marker[]; map?: google.maps.Map }) => {
+  addMarker: (m: google.maps.Marker) => void;
+  clearMarkers: () => void;
+};
+
 type LatLng = { lat: number; lng: number };
 
 type Listing = {
@@ -15,6 +21,7 @@ type Listing = {
   postcode?: string;
   city?: string;
   _mins?: number;
+  _isStrong?: boolean; // precomputed upstream
 };
 
 export type MapController = { focusOn: (id: string) => void };
@@ -23,12 +30,14 @@ export default function Map({
   center,
   listings,
   durations,
+  maxPins = 200,
   onSelect,
   onReady,
 }: {
   center: LatLng | null;
   listings: Listing[];
   durations: Record<string, number>;
+  maxPins?: number;
   onSelect: (l: Listing) => void;
   onReady?: (ctl: MapController) => void;
 }) {
@@ -36,6 +45,7 @@ export default function Map({
   const mapRef = useRef<google.maps.Map | null>(null);
   const markersRef = useRef<Record<string, google.maps.Marker>>({});
   const infoRef = useRef<google.maps.InfoWindow | null>(null);
+  const clustererRef = useRef<any>(null);
 
   const [loadErr, setLoadErr] = useState<string>("");
 
@@ -50,29 +60,40 @@ export default function Map({
       Math.abs(v.lng) <= 180
     );
   }
+  const safeCenter = useMemo<LatLng | null>(() => (isValidLatLng(center) ? center : null), [center]);
 
-  const safeCenter = useMemo<LatLng | null>(() => {
-    return isValidLatLng(center) ? center : null;
-  }, [center]);
-
+  // keep many pins but drop junk + cap to maxPins
   const safeListings = useMemo(() => {
-    return (listings || []).filter(
+    const arr = (listings || []).filter(
       (L) =>
         Number.isFinite(L.latitude) &&
         Number.isFinite(L.longitude) &&
         Math.abs(L.latitude) <= 90 &&
         Math.abs(L.longitude) <= 180
     );
-  }, [listings]);
+    return arr.slice(0, Math.max(1, maxPins));
+  }, [listings, maxPins]);
+
+  // simple svg marker icons
+  const iconFor = (strong: boolean): google.maps.Icon => {
+    const fill = strong ? "#16a34a" : "#6b7280"; // green / gray
+    return {
+      path: "M12 2C7.58 2 4 5.58 4 10c0 5.25 6.48 11.29 7.2 11.95a1 1 0 0 0 1.33 0C13.52 21.29 20 15.25 20 10c0-4.42-3.58-8-8-8z",
+      fillColor: fill,
+      fillOpacity: 1,
+      strokeWeight: 1,
+      strokeColor: "#ffffff",
+      scale: 1.2,
+      anchor: new google.maps.Point(12, 22),
+    } as any;
+  };
 
   // ---- load Google Maps once ----
   useEffect(() => {
     setLoadErr("");
-
     if (!mapDivRef.current) return;
-    if (!safeCenter) return; // wait until we have a valid center
+    if (!safeCenter) return;
 
-    // If map already created, just recentre and continue
     if (mapRef.current) {
       mapRef.current.setCenter(safeCenter);
       return;
@@ -95,24 +116,27 @@ export default function Map({
 
     loader
       .load()
-      .then(() => {
-        // Construct map
+      .then(async () => {
         mapRef.current = new google.maps.Map(mapDivRef.current as HTMLDivElement, {
           center: safeCenter,
-          zoom: 12,
+          zoom: 11,
           mapTypeControl: false,
           fullscreenControl: false,
           streetViewControl: false,
         });
         infoRef.current = new google.maps.InfoWindow();
 
-        // hand controller to parent
+        // Dynamic import clusterer once maps is loaded
+        const mod = (await import("@googlemaps/markerclusterer")) as any;
+        const MC = (mod.MarkerClusterer || mod.default) as MarkerClustererCtor;
+        clustererRef.current = new MC({ map: mapRef.current });
+
         onReady?.({
           focusOn: (id: string) => {
             const mk = markersRef.current[id];
             if (mk && mapRef.current) {
               mapRef.current.panTo(mk.getPosition()!);
-              mapRef.current.setZoom(Math.max(mapRef.current.getZoom() ?? 12, 14));
+              mapRef.current.setZoom(Math.max(mapRef.current.getZoom() ?? 11, 14));
               google.maps.event.trigger(mk, "click", {});
             }
           },
@@ -126,9 +150,9 @@ export default function Map({
 
   // ---- draw / update markers whenever listings change ----
   useEffect(() => {
-    if (!mapRef.current) return;
+    if (!mapRef.current || !clustererRef.current) return;
 
-    // clear markers that are no longer present
+    // clear stale markers
     const keep: Record<string, true> = {};
     for (const L of safeListings) keep[L.id] = true;
     for (const id of Object.keys(markersRef.current)) {
@@ -137,69 +161,68 @@ export default function Map({
         delete markersRef.current[id];
       }
     }
+    // reset clusterer
+    clustererRef.current.clearMarkers();
 
-    // add & update markers
+    // add & update
     for (const L of safeListings) {
-      const pos = { lat: Number(L.latitude), lng: Number(L.longitude) } as LatLng;
+      const pos: LatLng = { lat: Number(L.latitude), lng: Number(L.longitude) };
       if (!isValidLatLng(pos)) continue;
+
+      const strong = !!L._isStrong;
 
       let marker = markersRef.current[L.id];
       if (!marker) {
         marker = new google.maps.Marker({
           position: pos,
-          map: mapRef.current!,
           title: `${L.bedrooms} bed ${L.property_type} · £${(L.price_gbp || 0).toLocaleString()}`,
+          icon: iconFor(strong),
         });
         marker.addListener("click", () => {
           onSelect(L);
-          // simple info window
-          const commute =
+          const mins =
             typeof L._mins === "number"
-              ? ` · Commute ${L._mins} min`
-              : durations[L.id]
-              ? ` · Commute ${durations[L.id]} min`
-              : "";
+              ? L._mins
+              : Number.isFinite(durations[L.id])
+              ? durations[L.id]
+              : undefined;
+          const commute = mins != null ? ` · Commute ${mins} min` : "";
           const html = `
             <div style="font-size:12px;line-height:1.4;">
               <div><strong>£${(L.price_gbp || 0).toLocaleString()}</strong> · ${
             L.bedrooms
           } bed ${L.property_type}</div>
-              <div>${L.postcode || ""} ${L.city ? ", " + L.city : ""}${commute}</div>
+              <div>${L.postcode || ""}${L.city ? ", " + L.city : ""}${commute}</div>
             </div>`;
           infoRef.current?.setContent(html);
           infoRef.current?.open({ map: mapRef.current!, anchor: marker });
         });
         markersRef.current[L.id] = marker;
       } else {
-        // update position & title if changed
-        const curr = marker.getPosition();
-        if (!curr || curr.lat() !== pos.lat || curr.lng() !== pos.lng) {
-          marker.setPosition(pos);
-        }
+        marker.setPosition(pos);
         marker.setTitle(
           `${L.bedrooms} bed ${L.property_type} · £${(L.price_gbp || 0).toLocaleString()}`
         );
+        marker.setIcon(iconFor(strong));
       }
+
+      clustererRef.current.addMarker(marker);
     }
   }, [safeListings, durations, onSelect]);
 
-  // ---- keep center in sync (after map is created) ----
+  // keep center in sync
   useEffect(() => {
-    if (mapRef.current && safeCenter) {
-      mapRef.current.setCenter(safeCenter);
-    }
+    if (mapRef.current && safeCenter) mapRef.current.setCenter(safeCenter);
   }, [safeCenter]);
 
   // ---- UI ----
   if (!safeCenter) {
-    // Don’t blow up – show a friendly note instead of throwing
     return (
       <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
         Waiting for a valid map center…
       </div>
     );
   }
-
   if (loadErr) {
     return (
       <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
@@ -212,7 +235,6 @@ export default function Map({
     <div
       ref={mapDivRef}
       className="w-full h-[520px] rounded-xl border bg-gray-50"
-      // in case CSS fails somewhere, minimum height
       style={{ minHeight: 400 }}
     />
   );
