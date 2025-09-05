@@ -12,7 +12,11 @@ export default function NarrativePanel({
   return (
     <div className="p-4 rounded-xl border bg-white shadow-sm space-y-3">
       <div className="prose prose-sm max-w-none">
-        <p dangerouslySetInnerHTML={{ __html: text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>") }} />
+        <p
+          dangerouslySetInnerHTML={{
+            __html: text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>"),
+          }}
+        />
       </div>
       <ul className="space-y-3">
         {bullets.map((b, i) => (
@@ -22,7 +26,10 @@ export default function NarrativePanel({
             {!!b.tags?.length && (
               <div className="mt-1 flex flex-wrap gap-2">
                 {b.tags.map((t, i2) => (
-                  <span key={i2} className="text-xs px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border">
+                  <span
+                    key={i2}
+                    className="text-xs px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border"
+                  >
                     {t}
                   </span>
                 ))}
