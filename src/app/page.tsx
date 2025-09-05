@@ -182,12 +182,17 @@ export default function Page() {
       const { dest, mode } = parseCommuteFromText(text);
 
       // UK-biased geocode
-      const g = await fetch("/api/geocode", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: dest }),
-      });
-      if (!g.ok) throw new Error("Failed to geocode destination");
+     const destQuery = /,\s*(uk|united kingdom|great britain)/i.test(dest) ? dest : `${dest}, UK`;
+const g = await fetch("/api/geocode", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ query: destQuery }),
+});
+if (!g.ok) {
+  const gj = await g.json().catch(() => ({}));
+  const msg = gj?.error || "Failed to geocode destination";
+  throw new Error(msg);
+}
       const gjson = await g.json();
       const anchor = { lat: gjson.lat, lng: gjson.lng, name: gjson.name || dest };
       setDestination(anchor);
