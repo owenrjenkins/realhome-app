@@ -1,41 +1,58 @@
 import { NextResponse } from "next/server";
 
-const KEY = process.env.GOOGLE_MAPS_SERVER_KEY!;
+const KEY = process.env.GOOGLE_MAPS_SERVER_KEY;
 
 /**
  * POST /api/geocode
  * Body: { query: string }
  * Returns: { lat, lng, name }
  *
- * UK-biased geocoding: restricts to country:GB and also appends "UK" if user
- * hasn't specified a country. Fixes "Manchester (US)" issues.
+ * Strong UK bias:
+ * - Adds ", UK" if the user didn’t specify a country
+ * - Uses components=country:GB and region=uk
  */
 export async function POST(req: Request) {
   try {
+    if (!KEY) throw new Error("SERVER_KEY_MISSING");
     const { query } = await req.json();
-    if (!query || typeof query !== "string") throw new Error("missing_query");
+    if (!query || typeof query !== "string") {
+      return NextResponse.json({ error: "missing_query" }, { status: 400 });
+    }
 
-    const q = /\b(uk|united kingdom|gb|great britain)\b/i.test(query) ? query : `${query}, UK`;
+    // Normalise and bias to the UK
+    const trimmed = query.trim();
+    const hasCountry = /,\s*uk|,\s*united kingdom|,\s*great britain/i.test(trimmed);
+    const q = hasCountry ? trimmed : `${trimmed}, UK`;
 
     const params = new URLSearchParams({
       address: q,
+      components: "country:GB",
+      region: "uk",
       key: KEY,
-      region: "GB",                 // bias results to GB
-      components: "country:GB",     // restrict to GB
     });
 
     const url = `https://maps.googleapis.com/maps/api/geocode/json?${params.toString()}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { method: "GET", cache: "no-store" });
     const j = await res.json();
 
-    const item = j?.results?.[0];
+    if (!res.ok || j.status === "REQUEST_DENIED") {
+      const msg = j.error_message || "geocode_denied";
+      return NextResponse.json({ error: msg }, { status: 502 });
+    }
+    if (j.status !== "OK" || !Array.isArray(j.results) || j.results.length === 0) {
+      return NextResponse.json({ error: "not_found" }, { status: 404 });
+    }
+
+    const item = j.results[0];
     const loc = item?.geometry?.location;
-    if (!loc) return NextResponse.json({ error: "not_found" }, { status: 404 });
+    if (!loc || typeof loc.lat !== "number" || typeof loc.lng !== "number") {
+      return NextResponse.json({ error: "invalid_location" }, { status: 502 });
+    }
 
     const name =
       item?.address_components?.find((c: any) => c.types?.includes("locality"))?.long_name ||
       item?.formatted_address ||
-      query;
+      q;
 
     return NextResponse.json({ lat: loc.lat, lng: loc.lng, name });
   } catch (e: any) {
