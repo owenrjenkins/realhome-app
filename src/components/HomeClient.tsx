@@ -59,19 +59,19 @@ function parseCommuteFromText(text: string) {
   let minMins: number | undefined;
   let maxMins: number | undefined;
 
-  const under = t.match(/under\s*(\d+)\s*(?:min|mins|minutes)?/);
+  const under = t.match(/under\s*(\d+)\s*(?:min|mins|minutes)\b/);
   if (under) maxMins = Number(under[1]);
 
-  const over = t.match(/over\s*(\d+)\s*(?:min|mins|minutes)?/);
+  const over = t.match(/over\s*(\d+)\s*(?:min|mins|minutes)\b/);
   if (over) minMins = Number(over[1]);
 
-  const between = t.match(/between\s*(\d+)\s*(?:and|to|-)\s*(\d+)\s*(?:min|mins|minutes)?/);
+  const between = t.match(/between\s*(\d+)\s*(?:and|to|-)\s*(\d+)\s*(?:min|mins|minutes)\b/);
   if (between) {
     minMins = Number(between[1]);
     maxMins = Number(between[2]);
   }
 
-  const plain = t.match(/(\d+)\s*(?:min|mins|minutes)/);
+  const plain = t.match(/(\d+)\s*(?:min|mins|minutes)\b/);
   if (plain && !minMins && !maxMins) minsFallback = Number(plain[1]);
 
   const destMatch = text.match(/to\s+(.+?)(?:\s+by|\s*[,.;]|$)/i);
@@ -81,39 +81,69 @@ function parseCommuteFromText(text: string) {
   if (/car|drive|driving/.test(t)) mode = "driving";
   else if (/walk/.test(t)) mode = "walking";
   else if (/bike|cycle/.test(t)) mode = "bicycling";
-  else if (/train|bus|transit/.test(t)) mode = "transit";
+  else if (/train|bus|transit|tube/.test(t)) mode = "transit";
 
   return { minsFallback, minMins, maxMins, dest, mode };
 }
 
-function parseBudgetBeds(text: string) {
-  const t = (text || "").toLowerCase().replace(/[,£]/g, "").replace(/\s+/g, " ");
+/**
+ * Parse budget + beds from free text.
+ * IMPORTANT: avoid confusing "under 60 minutes" with money.
+ * We only treat numbers as money if:
+ *  - there's a £ sign OR
+ *  - the number has a k/m suffix OR
+ *  - the phrase mentions price/budget/cost.
+ * Also support "thousand/million" words, and assume plain numbers <1000 mean thousands (e.g., "under 600" => £600k) ONLY when the context indicates money.
+ */
+function parseBudgetBeds(original: string) {
+  const t = (original || "").toLowerCase();
+  const hasMoneyContext = /£|budget|price|cost|k\b|m\b|thousand|million/.test(t);
+
   let minBudget: number | undefined;
   let maxBudget: number | undefined;
 
-  const under = t.match(/under\s*(\d+)(k|m)?/);
-  if (under) {
-    const n = Number(under[1]);
-    maxBudget = under[2] === "m" ? n * 1_000_000 : under[2] === "k" ? n * 1_000 : n;
+  function toPounds(num: number, unit?: string) {
+    if (unit === "m") return num * 1_000_000;
+    if (unit === "k") return num * 1_000;
+    // If context is money and plain number is < 1000, treat as thousands.
+    if (hasMoneyContext && num < 1000) return num * 1000;
+    return num;
   }
-  const over = t.match(/over\s*(\d+)(k|m)?/);
-  if (over) {
-    const n = Number(over[1]);
-    minBudget = over[2] === "m" ? n * 1_000_000 : over[2] === "k" ? n * 1_000 : n;
-  }
-  const between = t.match(/between\s*(\d+)(k|m)?\s*(?:and|to|-)\s*(\d+)(k|m)?/);
-  if (between) {
-    const a =
-      Number(between[1]) *
-      (between[2] === "m" ? 1_000_000 : between[2] === "k" ? 1_000 : 1);
-    const b =
-      Number(between[3]) *
-      (between[4] === "m" ? 1_000_000 : between[4] === "k" ? 1_000 : 1);
+
+  // Helper that ensures we're not grabbing "minutes"
+  const moneyNumber = (re: RegExp) => {
+    const m = t.match(re);
+    if (!m) return null;
+    // If there's an explicit minutes keyword nearby, ignore
+    const after = t.slice(m.index || 0, (m.index || 0) + m[0].length + 8);
+    if (/min|mins|minutes/.test(after)) return null;
+    // Only accept if money context or has unit or has £ in original around the match
+    const span = original.slice(m.index || 0, (m.index || 0) + m[0].length + 1);
+    const hasPoundHere = /£/.test(span);
+    const unit = (m[2] || m[4] || "").toLowerCase();
+    if (!(hasMoneyContext || hasPoundHere || unit)) return null;
+    return m;
+  };
+
+  // under X (k/m/£)
+  const mUnder = moneyNumber(/under\s*£?\s*(\d+(?:\.\d+)?)\s*(k|m)?/);
+  if (mUnder) maxBudget = toPounds(Number(mUnder[1]), mUnder[2]);
+
+  // over X (k/m/£)
+  const mOver = moneyNumber(/over\s*£?\s*(\d+(?:\.\d+)?)\s*(k|m)?/);
+  if (mOver) minBudget = toPounds(Number(mOver[1]), mOver[2]);
+
+  // between A and B (k/m/£)
+  const mBetween = moneyNumber(/between\s*£?\s*(\d+(?:\.\d+)?)(k|m)?\s*(?:and|to|-)\s*£?\s*(\d+(?:\.\d+)?)(k|m)?/);
+  if (mBetween) {
+    const a = toPounds(Number(mBetween[1]), mBetween[2]);
+    const b = toPounds(Number(mBetween[3]), mBetween[4]);
     minBudget = Math.min(a, b);
     maxBudget = Math.max(a, b);
   }
 
-  const bm = t.match(/(\d+)\s*(?:bed|beds|bedroom|bedrooms)/i);
+  // Handle “X beds”
+  const bm = t.match(/(\d+)\s*(?:bed|beds|bedroom|bedrooms)\b/i);
   const beds = bm ? Number(bm[1]) : undefined;
 
   return { minBudget, maxBudget, beds };
@@ -140,6 +170,7 @@ export default function HomeClient() {
 
   const mapCtlRef = useRef<{ focusOn: (id: string) => void } | null>(null);
 
+  // Load CSV once
   useEffect(() => {
     loadListingsCsv()
       .then((data) => setListings(data))
@@ -158,11 +189,20 @@ export default function HomeClient() {
         const longitude = Number(L.longitude ?? L.lng);
         const id = ensureId(L);
         const commute = durations[id];
-        return { ...(L as any), id, latitude, longitude, price_gbp: Number(L.price_gbp || 0), _mins: commute } as ListingExt;
+        return {
+          ...(L as any),
+          id,
+          latitude,
+          longitude,
+          price_gbp: Number(L.price_gbp || 0),
+          _mins: commute,
+        } as ListingExt;
       })
       .filter((L) => {
+        // enforce valid coords
         if (!isSaneCoord(L.latitude, L.longitude)) return false;
         if (!isWithinUK(L.latitude, L.longitude)) return false;
+
         const near = distanceKm(destination, { lat: L.latitude, lng: L.longitude }) <= radiusKm;
         if (!near) return false;
 
@@ -171,6 +211,7 @@ export default function HomeClient() {
         if (maxBudget && price > maxBudget) return false;
         if (beds && (L as any).bedrooms < beds) return false;
 
+        // if we have a computed commute time, enforce it
         if (typeof L._mins === "number") {
           if (minMins && L._mins < minMins) return false;
           if (maxMins && L._mins > maxMins) return false;
@@ -192,8 +233,9 @@ export default function HomeClient() {
     setRoute(null);
 
     try {
-      const { dest, mode, minsFallback, minMins, maxMins } = parseCommuteFromText(text);
+      const { dest, mode, minsFallback, maxMins } = parseCommuteFromText(text);
 
+      // UK-biased geocode
       const destQuery = /,\s*(uk|united kingdom|great britain)/i.test(dest) ? dest : `${dest}, UK`;
       const g = await fetch("/api/geocode", {
         method: "POST",
@@ -205,9 +247,10 @@ export default function HomeClient() {
       const anchor = { lat: gjson.lat, lng: gjson.lng, name: gjson.name || dest };
       setDestination(anchor);
 
+      // Commute durations (batch)
       if (listings) {
         const radiusKm = 25;
-        const nearby = listings
+        const nearCandidates = listings
           .map((L: any) => ({
             ...L,
             id: ensureId(L),
@@ -227,18 +270,23 @@ export default function HomeClient() {
           body: JSON.stringify({
             origin: { lat: anchor.lat, lng: anchor.lng },
             mode,
-            listings: nearby.slice(0, 200).map((L) => ({ id: L.id, latitude: L.latitude, longitude: L.longitude })),
+            listings: nearCandidates.slice(0, 200).map((L) => ({
+              id: L.id,
+              latitude: L.latitude,
+              longitude: L.longitude,
+            })),
           }),
         });
+
         if (cRes.ok) {
           const cj = await cRes.json();
           setDurations(cj.durations || {});
 
-          // Narrative
+          // Narrative (simple first pass)
           const { minBudget, maxBudget, beds } = parseBudgetBeds(text);
           const strictCount = Object.keys(cj.durations || {}).length;
           const nearMissCount = 0;
-          const topAreas = []; // placeholder: could group by postcode
+          const topAreas: { outward: string; name: string; count: number }[] = []; // future: group by postcode
           setNarrative(
             buildNarrative({
               destinationName: anchor.name,
@@ -285,8 +333,8 @@ export default function HomeClient() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            origin: { lat: L.latitude, lng: L.longitude },
-            destination: { lat: destination.lat, lng: destination.lng },
+            origin: { lat: L.latitude, lng: L.longitude }, // home
+            destination: { lat: destination.lat, lng: destination.lng }, // target
             mode,
           }),
         });
@@ -331,7 +379,7 @@ export default function HomeClient() {
       </section>
 
       {destination && (
-        <div className="max-w-7xl mx-auto px-6 pb-8 text-sm text-gray-700">
+        <div className="max-w-7xl mx-auto px-6 pb-2 text-sm text-gray-700">
           Destination: <span className="font-medium">{destination.name}</span>
         </div>
       )}
@@ -357,7 +405,10 @@ export default function HomeClient() {
           <div className="space-y-4">
             <h2 className="text-lg font-semibold">Best matches</h2>
             {filteredListings.map((L) => (
-              <div key={L.id} className="group p-4 rounded-xl border bg-white shadow hover:shadow-md transition">
+              <div
+                key={L.id}
+                className="group p-4 rounded-xl border bg-white shadow hover:shadow-md transition"
+              >
                 <button
                   onClick={() => focusPin(L)}
                   className="font-semibold text-indigo-700 group-hover:underline"
