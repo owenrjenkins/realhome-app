@@ -6,6 +6,9 @@ import ErrorBanner from "@/components/ErrorBanner";
 import Badge from "@/components/Badge";
 import { loadListingsCsv, type MinimalListing } from "@/lib/loadCsv";
 import Map, { type Listing as MapListing } from "@/components/Map";
+import NarrativePanel from "@/components/NarrativePanel";
+import { lookupNearestArea } from "@/lib/areaCatalog";
+import { buildNarrative, buildAreaBullets } from "@/lib/narrative";
 
 // ---------- geo helpers ----------
 const UK_BBOX = { minLat: 49.0, maxLat: 59.5, minLng: -8.5, maxLng: 2.5 };
@@ -16,13 +19,9 @@ function isSaneCoord(lat: number, lng: number) {
   return Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && !(lat === 0 && lng === 0);
 }
 function distanceKm(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
-  const R = 6371;
-  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
-  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
-  const s1 = Math.sin(dLat / 2);
-  const s2 = Math.sin(dLng / 2);
-  const aa = s1 * s1 + Math.cos((a.lat * Math.PI) / 180) * Math.cos((b.lat * Math.PI) / 180) * s2 * s2;
-  return 2 * R * Math.asin(Math.sqrt(aa));
+  const R = 6371, dLat = ((b.lat - a.lat) * Math.PI) / 180, dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const s1 = Math.sin(dLat / 2), s2 = Math.sin(dLng / 2);
+  return 2 * R * Math.asin(Math.sqrt(s1 * s1 + Math.cos((a.lat * Math.PI) / 180) * Math.cos((b.lat * Math.PI) / 180) * s2 * s2));
 }
 function ensureId(L: any) {
   if (L.id) return String(L.id);
@@ -36,7 +35,6 @@ function ensureId(L: any) {
 function parseCommuteFromText(text: string) {
   const t = (text || "").toLowerCase();
 
-  // numeric range
   let minsFallback = 45;
   let minMins: number | undefined;
   let maxMins: number | undefined;
@@ -109,7 +107,7 @@ type ListingExt = MinimalListing & {
 // ---------- page ----------
 export default function Page() {
   const [text, setText] = useState(
-    "Quiet street near a big park, cafés and a good supermarket, under 45 minutes to central Manchester by car. 3 beds between £400,000 and £800,000."
+    "Quiet street near a big park, cafés and a good supermarket, under 60 minutes to London Bridge by public transport. 4 beds under £1m."
   );
 
   const [destination, setDestination] = useState<{ lat: number; lng: number; name: string } | null>(null);
@@ -124,52 +122,123 @@ export default function Page() {
       .catch((err) => setErrMsg(`CSV load failed: ${err.message}`));
   }, []);
 
-  const filteredListings = useMemo(() => {
-    if (!listings || !destination) return [];
-    const { minBudget, maxBudget, beds } = parseBudgetBeds(text);
-    const { minsFallback, minMins, maxMins } = parseCommuteFromText(text);
+  const { minsFallback, minMins, maxMins, dest, mode } = useMemo(() => parseCommuteFromText(text), [text]);
+  const { minBudget, maxBudget, beds } = useMemo(() => parseBudgetBeds(text), [text]);
+  const targetMaxMins = maxMins ?? minsFallback;
+
+  // Strict matches: meet all filters incl. commute (when we have it)
+  // Near-miss: within +20% of time OR within +10% over budget (but inside UK & sane & within 25km radius)
+  const { strict, nearMiss, anchor } = useMemo(() => {
+    if (!listings || !destination) return { strict: [] as ListingExt[], nearMiss: [] as ListingExt[], anchor: null as any };
+
     const radiusKm = 25;
+    const strictArr: ListingExt[] = [];
+    const nearArr: ListingExt[] = [];
 
-    const arr = listings
-      .map((L: any) => {
-        const latitude = Number(L.latitude ?? L.lat);
-        const longitude = Number(L.longitude ?? L.lng);
-        const id = ensureId(L);
-        const commute = durations[id];
-        return { ...(L as any), id, latitude, longitude, price_gbp: Number(L.price_gbp || 0), _mins: commute } as ListingExt;
-      })
-      .filter((L) => {
-        if (!isSaneCoord(L.latitude, L.longitude)) return false;
-        if (!isWithinUK(L.latitude, L.longitude)) return false;
-        const near = distanceKm(destination, { lat: L.latitude, lng: L.longitude }) <= radiusKm;
-        if (!near) return false;
+    for (const raw of listings) {
+      const latitude = Number((raw as any).latitude ?? (raw as any).lat);
+      const longitude = Number((raw as any).longitude ?? (raw as any).lng);
+      if (!isSaneCoord(latitude, longitude) || !isWithinUK(latitude, longitude)) continue;
 
-        const price = L.price_gbp || 0;
-        if (minBudget && price < minBudget) return false;
-        if (maxBudget && price > maxBudget) return false;
-        if (beds && (L as any).bedrooms < beds) return false;
+      // Only consider properties within a coarse radius from destination (keeps things local)
+      if (distanceKm(destination, { lat: latitude, lng: longitude }) > radiusKm) continue;
 
-        if (typeof L._mins === "number") {
-          if (minMins && L._mins < minMins) return false;
-          if (maxMins && L._mins > maxMins) return false;
-          if (!minMins && !maxMins && L._mins > minsFallback) return false;
-        }
-        return true;
-      })
-      .sort((a, b) => (a._mins ?? 9999) - (b._mins ?? 9999));
+      const id = ensureId(raw);
+      const price = Number((raw as any).price_gbp || 0);
+      const commute = durations[id]; // minutes (if computed)
+      const L: ListingExt = { ...(raw as any), id, latitude, longitude, price_gbp: price, _mins: commute };
 
-    return arr.slice(0, 10);
-  }, [listings, destination, text, durations]);
+      // Budget/beds hard gates
+      if (minBudget && price < minBudget) continue;
+      if (maxBudget && price > maxBudget * 1.10) {
+        // more than +10% over? reject entirely
+        continue;
+      }
+      if (beds && (L as any).bedrooms < beds) continue;
+
+      // Determine strict vs near-miss
+      const timeOkStrict =
+        typeof commute === "number"
+          ? commute <= targetMaxMins
+          : true; // if we don't have commute yet, don't demote (we'll refine after DM returns)
+
+      const timeOkNear =
+        typeof commute === "number" ? commute <= Math.round(targetMaxMins * 1.2) : true;
+
+      const budgetOkStrict = !maxBudget || price <= maxBudget;
+      const budgetOkNear = !maxBudget || price <= maxBudget * 1.1;
+
+      if (timeOkStrict && budgetOkStrict) strictArr.push(L);
+      else if (timeOkNear && budgetOkNear) nearArr.push(L);
+    }
+
+    // sort strict by commute then price
+    strictArr.sort((a, b) => (a._mins ?? 9e9) - (b._mins ?? 9e9) || a.price_gbp - b.price_gbp);
+    // keep near-miss reasonable
+    nearArr.sort((a, b) => (a._mins ?? 9e9) - (b._mins ?? 9e9) || a.price_gbp - b.price_gbp);
+
+    return { strict: strictArr.slice(0, 50), nearMiss: nearArr.slice(0, 50), anchor: destination };
+  }, [listings, destination, durations, minsFallback, maxMins, minBudget, maxBudget, beds, targetMaxMins]);
+
+  // Narrative aggregation by nearest area
+  const topAreas = useMemo(() => {
+    const areaCounts = new Map<string, { key: string; area: ReturnType<typeof lookupNearestArea>; count: number }>();
+    const up = (lat: number, lng: number) => {
+      const a = lookupNearestArea(lat, lng);
+      const key = a ? a.key : "unknown";
+      const bucket = areaCounts.get(key) || { key, area: a, count: 0 };
+      bucket.count += 1;
+      areaCounts.set(key, bucket);
+    };
+    for (const L of strict) up(L.latitude, L.longitude);
+    if (areaCounts.size < 3) {
+      for (const L of nearMiss) up(L.latitude, L.longitude);
+    }
+    return Array.from(areaCounts.values()).sort((a, b) => b.count - a.count).map(({ area, count }) => ({ area, count }));
+  }, [strict, nearMiss]);
+
+  // Build narrative text + area bullets
+  const narrativeText = useMemo(
+    () =>
+      buildNarrative({
+        destinationName: destination?.name || dest,
+        mode,
+        maxMins: targetMaxMins,
+        strictCount: strict.length,
+        nearMissCount: nearMiss.length,
+        budget: { min: minBudget, max: maxBudget },
+        beds,
+        topAreas,
+      }),
+    [destination?.name, dest, mode, targetMaxMins, strict.length, nearMiss.length, minBudget, maxBudget, beds, topAreas]
+  );
+  const areaBullets = useMemo(() => buildAreaBullets(topAreas), [topAreas]);
+
+  // Listings for map (strict only for now — near-miss layer next iteration)
+  const mapListings: MapListing[] = useMemo(
+    () =>
+      strict.map((L) => ({
+        id: L.id,
+        latitude: L.latitude,
+        longitude: L.longitude,
+        price_gbp: L.price_gbp,
+        bedrooms: (L as any).bedrooms,
+        address_line: (L as any).address_line,
+        postcode: L.postcode,
+        city: L.city,
+        commute_mins: L._mins,
+      })),
+    [strict]
+  );
 
   async function runSearch() {
     setErrMsg("");
-    setLoading(true);
     setDurations({});
+    setLoading(true);
 
     try {
+      // 1) Geocode destination (UK-bias)
       const { dest, mode } = parseCommuteFromText(text);
-
-      // UK-biased geocode
       const destQuery = /,\s*(uk|united kingdom|great britain)/i.test(dest) ? dest : `${dest}, UK`;
       const g = await fetch("/api/geocode", {
         method: "POST",
@@ -178,14 +247,13 @@ export default function Page() {
       });
       if (!g.ok) {
         const gj = await g.json().catch(() => ({}));
-        const msg = gj?.error || "Failed to geocode destination";
-        throw new Error(msg);
+        throw new Error(gj?.error || "Failed to geocode destination");
       }
       const gjson = await g.json();
       const anchor = { lat: gjson.lat, lng: gjson.lng, name: gjson.name || dest };
       setDestination(anchor);
 
-      // Commute durations for listings near the anchor
+      // 2) Commute durations for nearby candidates (coarse pre-filter to 25km)
       if (listings) {
         const radiusKm = 25;
         const nearby = listings
@@ -223,24 +291,9 @@ export default function Page() {
     }
   }
 
-  // Map expects listings shaped as MapListing[]
-  const mapListings: MapListing[] = useMemo(
-    () =>
-      filteredListings.map((L) => ({
-        id: L.id,
-        latitude: L.latitude,
-        longitude: L.longitude,
-        price_gbp: L.price_gbp,
-        bedrooms: (L as any).bedrooms,
-        address_line: (L as any).address_line,
-        postcode: L.postcode,
-        city: L.city,
-        commute_mins: L._mins,
-      })),
-    [filteredListings]
-  );
-
-  const currentMode = parseCommuteFromText(text).mode;
+  useEffect(() => {
+    // auto-load CSV on mount; user hits "Find areas" to trigger geocode/commute
+  }, []);
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-pink-50">
@@ -257,7 +310,7 @@ export default function Page() {
           rows={3}
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder='Describe your ideal location… (e.g., “under 45 minutes to central Manchester by car, 3 beds between £400k and £800k, near a big park and supermarket.”)'
+          placeholder='Describe your ideal location… (e.g., “under 60 minutes to London Bridge by public transport, 4 beds under £1m, near a park and supermarket.”)'
         />
         <button
           onClick={runSearch}
@@ -270,22 +323,26 @@ export default function Page() {
       </section>
 
       {destination && (
-        <div className="max-w-7xl mx-auto px-6 pb-2 text-sm text-gray-700">
-          Destination: <span className="font-medium">{destination.name}</span>
-        </div>
-      )}
-
-      {destination && (
-        <section className="grid md:grid-cols-3 gap-6 max-w-7xl mx-auto p-6">
-          {/* Map */}
-          <div className="md:col-span-2" style={{ minHeight: 560 }}>
-            <Map origin={{ lat: destination.lat, lng: destination.lng }} mode={currentMode} listings={mapListings} height={560} />
+        <div className="max-w-7xl mx-auto grid md:grid-cols-3 gap-6 p-6">
+          {/* Narrative */}
+          <div className="md:col-span-3">
+            <NarrativePanel text={narrativeText} bullets={areaBullets} />
           </div>
 
-          {/* Top 10 list */}
+          {/* Map */}
+          <div className="md:col-span-2" style={{ minHeight: 560 }}>
+            <Map
+              origin={{ lat: destination.lat, lng: destination.lng }}
+              mode={mode}
+              listings={mapListings}
+              height={560}
+            />
+          </div>
+
+          {/* Top matches */}
           <div className="space-y-4">
-            <h2 className="text-lg font-semibold">Top 10 listings</h2>
-            {filteredListings.map((L) => (
+            <h2 className="text-lg font-semibold">Best matches</h2>
+            {strict.slice(0, 10).map((L) => (
               <div key={L.id} className="p-4 rounded-xl border bg-white shadow hover:shadow-md transition">
                 <div className="font-semibold text-indigo-700">
                   £{(L.price_gbp || 0).toLocaleString()} · {L.bedrooms} bed {L.property_type}
@@ -296,8 +353,23 @@ export default function Page() {
                 </div>
               </div>
             ))}
+
+            {/* Near-misses (optional preview) */}
+            {nearMiss.length > 0 && (
+              <div className="p-3 rounded-lg border bg-white/70">
+                <div className="font-semibold mb-1">Near misses worth a look</div>
+                <div className="text-xs text-gray-600 mb-2">
+                  Slightly over time (+20%) or budget (+10%). Adjust filters if they look promising.
+                </div>
+                {nearMiss.slice(0, 6).map((L) => (
+                  <div key={L.id} className="py-1 text-sm">
+                    £{(L.price_gbp || 0).toLocaleString()} · {L.bedrooms} bed — {L.postcode} {typeof L._mins === "number" ? `· ${L._mins} min` : ""}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-        </section>
+        </div>
       )}
     </main>
   );
