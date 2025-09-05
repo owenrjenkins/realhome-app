@@ -6,6 +6,7 @@ import { Loader } from "@googlemaps/js-api-loader";
 // We import markerclusterer dynamically after the Maps JS is ready.
 type MarkerClustererCtor = new (opts: { markers?: google.maps.Marker[]; map?: google.maps.Map }) => {
   addMarker: (m: google.maps.Marker) => void;
+  addMarkers?: (m: google.maps.Marker[]) => void;
   clearMarkers: () => void;
 };
 
@@ -20,7 +21,7 @@ type Listing = {
   property_type: string;
   postcode?: string;
   city?: string;
-  _mins?: number;     // optional precomputed minutes
+  _mins?: number;      // minutes (optional, precomputed)
   _isStrong?: boolean; // precomputed upstream
 };
 
@@ -33,199 +34,58 @@ type Filters = {
   bedroomsMax?: number;
 };
 
-type Props = {
-  center: LatLng | null;
-  listings: Listing[];
-  durations: Record<string, number>; // server-verified minutes per listing
-  // REMOVE pin cap by default — map should render ALL matches.
-  maxPins?: number; // still supported, but default is effectively "no cap"
-  onSelect: (l: Listing) => void;
-  onReady?: (ctl: MapController) => void;
-
-  // NEW: for evidence/amenities/route
-  filters?: Filters;
-  amenityQueryText?: string; // free text like "near a primary school, tube, GP"
-  mode?: "driving" | "transit" | "walking" | "bicycling"; // for route polyline
-  maxMins?: number; // current commute cap (for evidence line)
-};
-
-const DEFAULT_MAX_MINS = 45;
-
-// Human keywords → Google Places types
-const AMENITY_KEYWORDS: Record<string, google.maps.places.PlaceType[]> = {
-  // family / education
-  "nursery": ["school"],
-  "primary school": ["school"],
-  "secondary school": ["school"],
-  "school": ["school"],
-  "university": ["university"],
-  // health
-  "gp": ["doctor"],
-  "doctor": ["doctor"],
-  "hospital": ["hospital"],
-  "pharmacy": ["pharmacy"],
-  "chemist": ["pharmacy"],
-  "dentist": ["dentist"],
-  "vet": ["veterinary_care"],
-  // parks & pets
-  "park": ["park"],
-  "playground": ["park"],
-  "dog park": ["park"],
-  // transport
-  "tube": ["subway_station"],
-  "underground": ["subway_station"],
-  "train": ["train_station"],
-  "rail": ["train_station"],
-  "dlr": ["light_rail_station"],
-  "tram": ["light_rail_station"],
-  "bus": ["bus_station"],
-  "coach": ["bus_station"],
-  "ferry": ["ferry_terminal"],
-  "airport": ["airport"],
-  // shopping & daily life
-  "supermarket": ["supermarket"],
-  "grocery": ["supermarket"],
-  "bakery": ["bakery"],
-  "butcher": ["store"],
-  "greengrocer": ["store"],
-  "convenience": ["convenience_store"],
-  "post office": ["post_office"],
-  "parcel": ["post_office"],
-  "atm": ["atm"],
-  "bank": ["bank"],
-  // food & drink / social
-  "coffee": ["cafe"],
-  "cafe": ["cafe"],
-  "coffee shop": ["cafe"],
-  "restaurant": ["restaurant"],
-  "pub": ["bar"],
-  "wine bar": ["bar"],
-  "bar": ["bar"],
-  // fitness & sport
-  "gym": ["gym"],
-  "swimming": ["gym"],
-  "tennis": ["stadium"],
-  "climbing": ["gym"],
-  // culture & leisure
-  "library": ["library"],
-  "cinema": ["movie_theater"],
-  "theatre": ["movie_theater"],
-  "bookshop": ["book_store"],
-  "museum": ["museum"],
-  "gallery": ["art_gallery"],
-  // mobility & car
-  "ev charger": ["electric_vehicle_charging_station"],
-  "charging": ["electric_vehicle_charging_station"],
-  "parking": ["parking"],
-  "car park": ["parking"],
-  "petrol": ["gas_station"],
-  "fuel": ["gas_station"],
-  // work & services
-  "coworking": ["point_of_interest"],
-  "postbox": ["post_office"],
-};
-
-const DEFAULT_AMENITY_THRESHOLDS: Partial<Record<google.maps.places.PlaceType, number>> = {
-  park: 1200,
-  supermarket: 1200,
-  school: 1500,
-  university: 2500,
-  doctor: 1500,
-  hospital: 3000,
-  pharmacy: 1200,
-  dentist: 1500,
-  veterinary_care: 2000,
-  subway_station: 1200,
-  train_station: 2000,
-  light_rail_station: 2000,
-  bus_station: 600,
-  ferry_terminal: 3000,
-  airport: 15000,
-  bakery: 800,
-  convenience_store: 600,
-  post_office: 1200,
-  atm: 400,
-  bank: 1200,
-  cafe: 600,
-  restaurant: 800,
-  bar: 800,
-  gym: 1200,
-  stadium: 2500,
-  movie_theater: 2000,
-  library: 1500,
-  book_store: 1500,
-  museum: 3000,
-  art_gallery: 3000,
-  electric_vehicle_charging_station: 1200,
-  parking: 800,
-  gas_station: 1500,
-  point_of_interest: 2000,
-};
-
-function parseAmenityTypesFromText(text?: string): google.maps.places.PlaceType[] {
-  if (!text) return [];
-  const lc = text.toLowerCase();
-  const out: google.maps.places.PlaceType[] = [];
-  for (const [key, types] of Object.entries(AMENITY_KEYWORDS)) {
-    if (lc.includes(key)) {
-      for (const t of types) if (!out.includes(t)) out.push(t);
-    }
-  }
-  return out;
-}
-
 export default function Map({
   center,
   listings,
   durations,
-  maxPins = Number.POSITIVE_INFINITY, // default: no cap
+  // NOTE: we intentionally IGNORE maxPins to avoid accidental caps
+  maxPins, // eslint-disable-line @typescript-eslint/no-unused-vars
   onSelect,
   onReady,
+  // NEW (optional) for evidence/amenities/route
   filters,
   amenityQueryText,
   mode = "transit",
-  maxMins = DEFAULT_MAX_MINS,
-}: Props) {
+  maxMins = 45,
+}: {
+  center: LatLng | null;
+  listings: Listing[];
+  durations: Record<string, number>;
+  maxPins?: number;
+  onSelect: (l: Listing) => void;
+  onReady?: (ctl: MapController) => void;
+  filters?: Filters;
+  amenityQueryText?: string; // free-text like "near a primary school, tube, GP"
+  mode?: "driving" | "transit" | "walking" | "bicycling";
+  maxMins?: number;
+}) {
   const mapDivRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
   const markersRef = useRef<Record<string, google.maps.Marker>>({});
   const infoRef = useRef<google.maps.InfoWindow | null>(null);
-  const clustererRef = useRef<any>(null);
-
+  const clustererRef = useRef<InstanceType<MarkerClustererCtor> | null>(null);
   const directionsRendererRef = useRef<google.maps.DirectionsRenderer | null>(null);
+
   const [loadErr, setLoadErr] = useState<string>("");
-
-  // amenity hits for current selection
   const [nearby, setNearby] = useState<Record<google.maps.places.PlaceType, { meters: number; name?: string } | undefined>>({});
-  const requestedAmenityTypes = useMemo(() => parseAmenityTypesFromText(amenityQueryText), [amenityQueryText]);
 
-  // ---- helpers ----
-  function isValidLatLng(v: any): v is LatLng {
-    return (
-      v &&
-      typeof v === "object" &&
-      Number.isFinite(v.lat) &&
-      Number.isFinite(v.lng) &&
-      Math.abs(v.lat) <= 90 &&
-      Math.abs(v.lng) <= 180
-    );
-  }
+  // ---------- helpers ----------
+  const isValidLatLng = (v: any): v is LatLng =>
+    v && typeof v === "object" && Number.isFinite(v.lat) && Number.isFinite(v.lng) && Math.abs(v.lat) <= 90 && Math.abs(v.lng) <= 180;
+
   const safeCenter = useMemo<LatLng | null>(() => (isValidLatLng(center) ? center : null), [center]);
 
-  // KEEP ALL valid pins; only drop invalid coords. (No slicing.)
+  // KEEP ALL valid pins (NO slicing). Only drop invalid coords.
   const safeListings = useMemo(() => {
-    const arr = (listings || []).filter(
+    return (listings || []).filter(
       (L) =>
         Number.isFinite(L.latitude) &&
         Number.isFinite(L.longitude) &&
         Math.abs(L.latitude) <= 90 &&
         Math.abs(L.longitude) <= 180
     );
-    if (!Number.isFinite(maxPins) || maxPins === Infinity) return arr;
-    return arr.slice(0, Math.max(1, maxPins));
-  }, [listings, maxPins]);
+  }, [listings]);
 
-  // simple svg marker icons
   const iconFor = (strong: boolean): google.maps.Icon => {
     const fill = strong ? "#16a34a" : "#6b7280"; // green / gray
     return {
@@ -239,20 +99,55 @@ export default function Map({
     } as any;
   };
 
-  function travelModeToGoogle(m: Props["mode"]): google.maps.TravelMode {
+  const travelModeToGoogle = (m: "driving" | "transit" | "walking" | "bicycling"): google.maps.TravelMode => {
     switch (m) {
       case "walking": return google.maps.TravelMode.WALKING;
       case "bicycling": return google.maps.TravelMode.BICYCLING;
       case "transit": return google.maps.TravelMode.TRANSIT;
       default: return google.maps.TravelMode.DRIVING;
     }
-  }
+  };
 
-  // ---- load Google Maps once ----
+  // ---------- Amenity parsing ----------
+  const AMENITY_KEYWORDS: Record<string, google.maps.places.PlaceType[]> = {
+    "nursery": ["school"], "primary school": ["school"], "secondary school": ["school"], "school": ["school"], "university": ["university"],
+    "gp": ["doctor"], "doctor": ["doctor"], "hospital": ["hospital"], "pharmacy": ["pharmacy"], "chemist": ["pharmacy"], "dentist": ["dentist"], "vet": ["veterinary_care"],
+    "park": ["park"], "playground": ["park"], "dog park": ["park"],
+    "tube": ["subway_station"], "underground": ["subway_station"], "train": ["train_station"], "rail": ["train_station"], "dlr": ["light_rail_station"],
+    "tram": ["light_rail_station"], "bus": ["bus_station"], "coach": ["bus_station"], "ferry": ["ferry_terminal"], "airport": ["airport"],
+    "supermarket": ["supermarket"], "grocery": ["supermarket"], "bakery": ["bakery"], "butcher": ["store"], "greengrocer": ["store"],
+    "convenience": ["convenience_store"], "post office": ["post_office"], "parcel": ["post_office"], "atm": ["atm"], "bank": ["bank"],
+    "coffee": ["cafe"], "cafe": ["cafe"], "coffee shop": ["cafe"], "restaurant": ["restaurant"], "pub": ["bar"], "wine bar": ["bar"], "bar": ["bar"],
+    "gym": ["gym"], "swimming": ["gym"], "tennis": ["stadium"], "climbing": ["gym"],
+    "library": ["library"], "cinema": ["movie_theater"], "theatre": ["movie_theater"], "bookshop": ["book_store"], "museum": ["museum"], "gallery": ["art_gallery"],
+    "ev charger": ["electric_vehicle_charging_station"], "charging": ["electric_vehicle_charging_station"],
+    "parking": ["parking"], "car park": ["parking"], "petrol": ["gas_station"], "fuel": ["gas_station"],
+    "coworking": ["point_of_interest"], "postbox": ["post_office"],
+  };
+
+  const DEFAULT_AMENITY_THRESHOLDS: Partial<Record<google.maps.places.PlaceType, number>> = {
+    park: 1200, supermarket: 1200, school: 1500, university: 2500, doctor: 1500, hospital: 3000, pharmacy: 1200, dentist: 1500, veterinary_care: 2000,
+    subway_station: 1200, train_station: 2000, light_rail_station: 2000, bus_station: 600, ferry_terminal: 3000, airport: 15000,
+    bakery: 800, convenience_store: 600, post_office: 1200, atm: 400, bank: 1200,
+    cafe: 600, restaurant: 800, bar: 800,
+    gym: 1200, stadium: 2500, movie_theater: 2000, library: 1500, book_store: 1500, museum: 3000, art_gallery: 3000,
+    electric_vehicle_charging_station: 1200, parking: 800, gas_station: 1500, point_of_interest: 2000,
+  };
+
+  const requestedAmenityTypes = useMemo(() => {
+    if (!amenityQueryText) return [];
+    const lc = amenityQueryText.toLowerCase();
+    const out: google.maps.places.PlaceType[] = [];
+    for (const [key, types] of Object.entries(AMENITY_KEYWORDS)) {
+      if (lc.includes(key)) types.forEach(t => { if (!out.includes(t)) out.push(t); });
+    }
+    return out;
+  }, [amenityQueryText]);
+
+  // ---------- load Google Maps once ----------
   useEffect(() => {
     setLoadErr("");
-    if (!mapDivRef.current) return;
-    if (!safeCenter) return;
+    if (!mapDivRef.current || !safeCenter) return;
 
     if (mapRef.current) {
       mapRef.current.setCenter(safeCenter);
@@ -271,7 +166,7 @@ export default function Map({
     const loader = new Loader({
       apiKey,
       version: "weekly",
-      libraries: ["places", "geometry"], // IMPORTANT for Nearby + distance meters
+      libraries: ["places", "geometry"], // needed for Nearby + spherical distances
     });
 
     loader
@@ -286,17 +181,17 @@ export default function Map({
         });
         infoRef.current = new google.maps.InfoWindow();
 
-        // Dynamic import clusterer once maps is loaded
-        const mod = (await import("@googlemaps/markerclusterer")) as any;
-        const MC = (mod.MarkerClusterer || mod.default) as MarkerClustererCtor;
-        clustererRef.current = new MC({ map: mapRef.current });
-
-        // Prepare a DirectionsRenderer instance for polylines
+        // Directions renderer for polylines
         directionsRendererRef.current = new google.maps.DirectionsRenderer({
           suppressMarkers: true,
           preserveViewport: true,
         });
         directionsRendererRef.current.setMap(mapRef.current);
+
+        // Dynamic import clusterer once maps is loaded
+        const mod = (await import("@googlemaps/markerclusterer")) as any;
+        const MC = (mod.MarkerClusterer || mod.default) as MarkerClustererCtor;
+        clustererRef.current = new MC({ map: mapRef.current });
 
         onReady?.({
           focusOn: (id: string) => {
@@ -315,14 +210,9 @@ export default function Map({
       });
   }, [safeCenter, onReady]);
 
-  // Build info window HTML with evidence; Nearby lines *only* for requested categories.
+  // ---------- InfoWindow HTML ----------
   function buildInfoHTML(L: Listing) {
-    const mins =
-      typeof L._mins === "number"
-        ? L._mins
-        : Number.isFinite(durations[L.id])
-        ? durations[L.id]
-        : undefined;
+    const mins = Number.isFinite(durations[L.id]) ? durations[L.id] : (typeof L._mins === "number" ? L._mins : undefined);
 
     const commuteLine =
       mins != null
@@ -347,18 +237,17 @@ export default function Map({
         : "",
     ].join("");
 
-    // Nearby requested categories only
+    // Nearby evidence ONLY for requested categories
     const amenityLines = requestedAmenityTypes
       .map((type) => {
         const hit = nearby[type];
         const limit = DEFAULT_AMENITY_THRESHOLDS[type] ?? 1500;
         if (hit) {
-          const name = hit.name ? ` ${hit.name}` : " place";
           const pass = hit.meters <= limit ? "✓" : "✗";
+          const name = hit.name ? ` ${hit.name}` : " place";
           return `<li>${type.replaceAll("_", " ")} ≤ ${limit} m — ${pass} (nearest${name} at ${Math.round(hit.meters)} m)</li>`;
-        } else {
-          return `<li>${type.replaceAll("_", " ")} — searching…</li>`;
         }
+        return `<li>${type.replaceAll("_", " ")} — searching…</li>`;
       })
       .join("");
 
@@ -377,18 +266,15 @@ export default function Map({
     `;
   }
 
-  // Draw directions polyline with timeout and fallbacks (preferred → driving → walking)
-  async function drawRoute(from: LatLng, to: LatLng, preferred: Props["mode"]) {
+  // ---------- Directions polyline with timeouts + fallbacks ----------
+  async function drawRoute(from: LatLng, to: LatLng, preferred: "driving" | "transit" | "walking" | "bicycling") {
     if (!mapRef.current || !directionsRendererRef.current) return;
     const svc = new google.maps.DirectionsService();
-    const modes = Array.from(
-      new Set<google.maps.TravelMode>([
-        travelModeToGoogle(preferred),
-        google.maps.TravelMode.DRIVING,
-        google.maps.TravelMode.WALKING,
-      ])
-    );
-
+    const modes = Array.from(new Set<google.maps.TravelMode>([
+      travelModeToGoogle(preferred),
+      google.maps.TravelMode.DRIVING,
+      google.maps.TravelMode.WALKING,
+    ]));
     for (const m of modes) {
       try {
         const req: google.maps.DirectionsRequest = {
@@ -399,9 +285,7 @@ export default function Map({
         };
         const res = (await Promise.race([
           svc.route(req),
-          new Promise<google.maps.DirectionsResult>((_, reject) =>
-            setTimeout(() => reject(new Error("directions_timeout")), 9000)
-          ),
+          new Promise<google.maps.DirectionsResult>((_, reject) => setTimeout(() => reject(new Error("directions_timeout")), 9000)),
         ])) as google.maps.DirectionsResult;
         if (res?.routes?.length) {
           directionsRendererRef.current.setDirections(res);
@@ -411,59 +295,55 @@ export default function Map({
         // try next
       }
     }
-    // if all fail, clear polyline but keep minutes (server verified)
+    // All failed -> clear polyline, keep minutes from server
     directionsRendererRef.current.setDirections({ routes: [] } as any);
   }
 
-  // Helper: kick off Nearby for requested categories with timeout, then refresh the info window
+  // ---------- Nearby fetch (only for requested categories) ----------
   async function fetchNearbyFor(L: Listing) {
     if (!mapRef.current || requestedAmenityTypes.length === 0) return;
-    setNearby({}); // reset
+    setNearby({}); // reset for new selection
     const svc = new google.maps.places.PlacesService(mapRef.current);
-
     const origin = { lat: L.latitude, lng: L.longitude };
-    const tasks = requestedAmenityTypes.map(
-      (type) =>
-        new Promise<void>((resolve) => {
-          const timer = setTimeout(() => {
-            // timeout -> no result
-            resolve();
-          }, 6000);
-          svc.nearbySearch(
-            { location: origin as any, radius: 1500, type },
-            (results, status) => {
-              clearTimeout(timer);
-              if (status === google.maps.places.PlacesServiceStatus.OK && results?.[0]) {
-                const r = results[0];
-                const meters = r.geometry?.location
-                  ? google.maps.geometry.spherical.computeDistanceBetween(
-                      new google.maps.LatLng(origin.lat, origin.lng),
-                      r.geometry.location
-                    )
-                  : undefined;
-                if (typeof meters === "number") {
-                  setNearby((prev) => ({ ...prev, [type]: { meters, name: r.name } }));
-                }
+
+    const tasks = requestedAmenityTypes.map((type) =>
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(() => resolve(), 6000); // timeout -> no result
+        svc.nearbySearch(
+          { location: origin as any, radius: 1500, type },
+          (results, status) => {
+            clearTimeout(timer);
+            if (status === google.maps.places.PlacesServiceStatus.OK && results?.[0]) {
+              const r = results[0];
+              const meters = r.geometry?.location
+                ? google.maps.geometry.spherical.computeDistanceBetween(
+                    new google.maps.LatLng(origin.lat, origin.lng),
+                    r.geometry.location
+                  )
+                : undefined;
+              if (typeof meters === "number") {
+                setNearby((prev) => ({ ...prev, [type]: { meters, name: r.name } }));
               }
-              resolve();
             }
-          );
-        })
+            resolve();
+          }
+        );
+      })
     );
 
     await Promise.all(tasks);
-    // After Nearby resolves, refresh info content (if still open for this listing)
+    // refresh info window content if still open for this listing
     const mk = markersRef.current[L.id];
     if (mk && infoRef.current?.get("anchor") === mk) {
       infoRef.current.setContent(buildInfoHTML(L));
     }
   }
 
-  // ---- draw / update markers whenever listings change ----
+  // ---------- draw / update markers whenever listings change ----------
   useEffect(() => {
     if (!mapRef.current || !clustererRef.current) return;
 
-    // clear stale markers
+    // remove stale markers
     const keep: Record<string, true> = {};
     for (const L of safeListings) keep[L.id] = true;
     for (const id of Object.keys(markersRef.current)) {
@@ -472,16 +352,17 @@ export default function Map({
         delete markersRef.current[id];
       }
     }
+
     // reset clusterer
     clustererRef.current.clearMarkers();
 
-    // add & update
+    // add markers (batched to keep UI smooth)
+    const newMarkers: google.maps.Marker[] = [];
     for (const L of safeListings) {
       const pos: LatLng = { lat: Number(L.latitude), lng: Number(L.longitude) };
       if (!isValidLatLng(pos)) continue;
 
       const strong = !!L._isStrong;
-
       let marker = markersRef.current[L.id];
       if (!marker) {
         marker = new google.maps.Marker({
@@ -489,48 +370,46 @@ export default function Map({
           title: `${L.bedrooms} bed ${L.property_type} · £${(L.price_gbp || 0).toLocaleString()}`,
           icon: iconFor(strong),
         });
-
+        // Click handler
         marker.addListener("click", () => {
           onSelect(L);
 
-          // Open info with initial evidence (amenities may still say "searching…")
-          const html = buildInfoHTML(L);
-          infoRef.current?.setContent(html);
+          // Open info with initial evidence (amenities may show "searching…" until loaded)
+          infoRef.current?.setContent(buildInfoHTML(L));
           infoRef.current?.open({ map: mapRef.current!, anchor: marker });
 
-          // Kick off Nearby only if requested in free text
+          // Nearby (only if requested in free text)
           if (requestedAmenityTypes.length > 0) fetchNearbyFor(L).catch(() => {});
 
-          // Always attempt to draw a route polyline (fallback modes + timeout)
-          drawRoute({ lat: pos.lat, lng: pos.lng }, { lat: pos.lat, lng: pos.lng }, mode).catch(() => {});
-          // ^ above "from" should be current origin center, not listing pos.
+          // Route polyline: from current center (origin) -> listing
+          if (safeCenter) drawRoute(safeCenter, { lat: pos.lat, lng: pos.lng }, mode).catch(() => {});
         });
 
         markersRef.current[L.id] = marker;
       } else {
         marker.setPosition(pos);
-        marker.setTitle(
-          `${L.bedrooms} bed ${L.property_type} · £${(L.price_gbp || 0).toLocaleString()}`
-        );
+        marker.setTitle(`${L.bedrooms} bed ${L.property_type} · £${(L.price_gbp || 0).toLocaleString()}`);
         marker.setIcon(iconFor(strong));
       }
+      newMarkers.push(marker);
+    }
 
-      clustererRef.current.addMarker(marker);
+    // add to clusterer
+    if ("addMarkers" in clustererRef.current! && typeof clustererRef.current!.addMarkers === "function") {
+      clustererRef.current!.addMarkers!(newMarkers);
+    } else {
+      // fallback for older markerclusterer API
+      newMarkers.forEach((m) => clustererRef.current!.addMarker(m));
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [safeListings, durations, onSelect, requestedAmenityTypes.length, mode]);
+  }, [safeListings, durations, onSelect, requestedAmenityTypes.length, mode, safeCenter?.lat, safeCenter?.lng]);
 
   // keep center in sync
   useEffect(() => {
     if (mapRef.current && safeCenter) mapRef.current.setCenter(safeCenter);
-  }, [safeCenter]);
-
-  // Clear route polyline whenever center/mode changes (and info is open)
-  useEffect(() => {
-    if (directionsRendererRef.current) {
-      directionsRendererRef.current.setDirections({ routes: [] } as any);
-    }
-  }, [mode, safeCenter?.lat, safeCenter?.lng]);
+    // also clear route when origin changes
+    if (directionsRendererRef.current) directionsRendererRef.current.setDirections({ routes: [] } as any);
+  }, [safeCenter?.lat, safeCenter?.lng]);
 
   // ---- UI ----
   if (!safeCenter) {
@@ -554,7 +433,7 @@ export default function Map({
       className="w-full h-[520px] rounded-xl border bg-gray-50"
       style={{ minHeight: 400, position: "relative" }}
     >
-      {/* DEBUG HUD — remove for prod */}
+      {/* DEBUG HUD — helps verify no cap; remove for prod */}
       <div
         style={{
           position: "absolute",
@@ -572,7 +451,7 @@ export default function Map({
       >
         <div><strong>Debug</strong></div>
         <div>pins rendered: {safeListings.length}</div>
-        <div>amenity types: {requestedAmenityTypes.join(", ") || "none"}</div>
+        <div>requested amenities: {requestedAmenityTypes.join(", ") || "none"}</div>
         <div>nearby found: {
           Object.keys(nearby).length
             ? Object.entries(nearby).map(([k,v]) => `${k}:${v?.meters ? Math.round(v.meters)+"m" : "—"}`).join(" | ")
