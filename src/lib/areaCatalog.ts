@@ -7,10 +7,6 @@ export type Area = {
   tags?: string[];
 };
 
-/**
- * Seed catalog: add/edit freely. Keep to 1–2 lines each.
- * (We use nearest-hub matching to attach listings to an area.)
- */
 export const AREAS: Area[] = [
   {
     key: "guildford",
@@ -42,7 +38,7 @@ export const AREAS: Area[] = [
   {
     key: "st-albans",
     name: "St Albans",
-    lat: 51.7520,
+    lat: 51.752,
     lng: -0.3367,
     summary:
       "Cathedral city north of London; period streets, good primaries/secondaries, fast trains via Thameslink.",
@@ -60,7 +56,7 @@ export const AREAS: Area[] = [
   {
     key: "bromley",
     name: "Bromley",
-    lat: 51.4060,
+    lat: 51.406,
     lng: 0.0152,
     summary:
       "Outer SE London borough; good family housing, parks, and rail into London terminals.",
@@ -79,16 +75,18 @@ export const AREAS: Area[] = [
 
 /** Haversine in km */
 function distanceKm(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
-  const R = 6371, dLat = ((b.lat - a.lat) * Math.PI) / 180, dLng = ((b.lng - a.lng) * Math.PI) / 180;
-  const s1 = Math.sin(dLat / 2), s2 = Math.sin(dLng / 2);
-  return 2 * R * Math.asin(Math.sqrt(s1 * s1 + Math.cos((a.lat * Math.PI) / 180) * Math.cos((b.lat * Math.PI) / 180) * s2 * s2));
+  const R = 6371,
+    dLat = ((b.lat - a.lat) * Math.PI) / 180,
+    dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const s1 = Math.sin(dLat / 2),
+    s2 = Math.sin(dLng / 2);
+  return 2 * R * Math.asin(
+    Math.sqrt(s1 * s1 + Math.cos((a.lat * Math.PI) / 180) * Math.cos((b.lat * Math.PI) / 180) * s2 * s2)
+  );
 }
 
-/**
- * Simple nearest-hub matcher. Returns the closest catalog area within `withinKm`.
- * If none is close enough, returns null (we can fall back to city/postcode text).
- */
-export function lookupNearestArea(lat: number, lng: number, withinKm = 30): Area | null {
+/** Return closest catalog area within `withinKm`, else null */
+export function lookupNearestArea(lat: number, lng: number, withinKm = 30) {
   let best: { area: Area; d: number } | null = null;
   for (const a of AREAS) {
     const d = distanceKm({ lat, lng }, { lat: a.lat, lng: a.lng });
