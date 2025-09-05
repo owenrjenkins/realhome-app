@@ -172,16 +172,24 @@ app.post('/api/properties/travel-filter', async (req, res) => {
     const radiusKm = Math.max(1, (speed * maxSecs) / 3600);
     const pre = base.filter(p => haversineKm(origin, { lat: p.lat, lng: p.lng }) <= radiusKm);
 
-    // 3) cap candidates to nearest N by crow-fly, to keep latency sane
-    const MAX_CANDIDATES = 1000;
-    let candidates = pre;
-    if (pre.length > MAX_CANDIDATES) {
-      candidates = pre
-        .map(p => ({ p, d: haversineKm(origin, { lat: p.lat, lng: p.lng }) }))
-        .sort((a, b) => a.d - b.d)
-        .slice(0, MAX_CANDIDATES)
-        .map(x => x.p);
-    }
+// 3) cap candidates to nearest N by crow-fly, to keep latency sane
+//    Now tunable via req.body.maxCandidates or ?maxCandidates=, with sensible bounds.
+const MAX_CANDIDATES_DEFAULT = 2000;     // previous was 1000
+const MAX_CANDIDATES_HARD_CAP = 10000;   // absolute ceiling
+const requestedMax = Number(req.query.maxCandidates ?? req.body?.maxCandidates ?? MAX_CANDIDATES_DEFAULT);
+const MAX_CANDIDATES = Math.min(
+  Math.max(200, requestedMax || MAX_CANDIDATES_DEFAULT), // at least 200
+  MAX_CANDIDATES_HARD_CAP
+);
+
+let candidates = pre;
+if (pre.length > MAX_CANDIDATES) {
+  candidates = pre
+    .map(p => ({ p, d: haversineKm(origin, { lat: p.lat, lng: p.lng }) }))
+    .sort((a, b) => a.d - b.d)
+    .slice(0, MAX_CANDIDATES)
+    .map(x => x.p);
+}
 
     // 4) batch Distance Matrix and keep those <= maxSecs
     const dests = candidates.map(c => ({ lat: c.lat, lng: c.lng }));
