@@ -1,12 +1,19 @@
-import { useCallback, useMemo, useState } from "react";
-import { GoogleMap, LoadScript, Marker } from "@react-google-maps/api";
+import { useCallback, useMemo, useRef, useState } from "react";
+import {
+  GoogleMap,
+  LoadScript,
+  Marker,
+  InfoWindow,
+  DirectionsRenderer,
+} from "@react-google-maps/api";
 import { useTravelFilteredProperties } from "../hooks/useTravelFilteredProperties";
 
 type LatLng = { lat: number; lng: number };
+type TravelMode = "driving" | "transit" | "walking" | "bicycling";
 
 type Props = {
   initialOrigin?: LatLng;
-  mode?: "driving" | "transit" | "walking" | "bicycling";
+  mode?: TravelMode;
   maxMins?: number;
   filters?: {
     priceMin?: number;
@@ -20,13 +27,11 @@ export default function TravelFilteredMap({
   initialOrigin = { lat: 51.5074, lng: -0.1278 }, // London
   mode = "driving",
   maxMins = 45,
-  filters = {}
+  filters = {},
 }: Props) {
   const [origin, setOrigin] = useState<LatLng>(initialOrigin);
-  const [currentMode, setCurrentMode] =
-    useState<"driving" | "transit" | "walking" | "bicycling">(mode);
+  const [currentMode, setCurrentMode] = useState<TravelMode>(mode);
   const [currentMax, setCurrentMax] = useState<number>(maxMins);
-
   const { props: properties, loading, meta } = useTravelFilteredProperties(
     origin,
     currentMode,
@@ -34,8 +39,19 @@ export default function TravelFilteredMap({
     filters
   );
 
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [route, setRoute] = useState<google.maps.DirectionsResult | null>(null);
+
   const gmApiKey = import.meta.env.VITE_MAPS_JS_KEY as string;
   const center = useMemo(() => origin, [origin]);
+
+  const mapRef = useRef<google.maps.Map | null>(null);
+  const onLoad = useCallback((map: google.maps.Map) => {
+    mapRef.current = map;
+  }, []);
+  const onUnmount = useCallback(() => {
+    mapRef.current = null;
+  }, []);
 
   const mapOptions: google.maps.MapOptions = {
     disableDefaultUI: false,
@@ -44,12 +60,52 @@ export default function TravelFilteredMap({
     mapTypeControl: false,
     zoomControl: true,
     gestureHandling: "greedy",
-    minZoom: 5
+    minZoom: 5,
   };
 
   const onMapClick = useCallback((e: google.maps.MapMouseEvent) => {
-    if (e.latLng) setOrigin({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+    if (e.latLng) {
+      setOrigin({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+      setRoute(null); // clear any route when origin changes
+    }
   }, []);
+
+  const selected = useMemo(
+    () => properties.find((p) => p.id === selectedId) || null,
+    [properties, selectedId]
+  );
+
+  const travelModeToGoogle = (m: TravelMode): google.maps.TravelMode => {
+    switch (m) {
+      case "walking":
+        return google.maps.TravelMode.WALKING;
+      case "bicycling":
+        return google.maps.TravelMode.BICYCLING;
+      case "transit":
+        return google.maps.TravelMode.TRANSIT;
+      default:
+        return google.maps.TravelMode.DRIVING;
+    }
+  };
+
+  async function handleShowRoute() {
+    if (!selected || !mapRef.current) return;
+    const svc = new google.maps.DirectionsService();
+    const req: google.maps.DirectionsRequest = {
+      origin: new google.maps.LatLng(origin.lat, origin.lng),
+      destination: new google.maps.LatLng(selected.lat, selected.lng),
+      travelMode: travelModeToGoogle(currentMode),
+      // For transit, you can add transitOptions if needed
+      // transitOptions: { modes: [google.maps.TransitMode.SUBWAY, ...] }
+      // drivingOptions: { departureTime: new Date() }
+    };
+    const res = await svc.route(req);
+    setRoute(res);
+  }
+
+  function handleClearRoute() {
+    setRoute(null);
+  }
 
   return (
     <div style={{ width: "100%", height: "100%", position: "relative" }}>
@@ -66,14 +122,17 @@ export default function TravelFilteredMap({
           display: "flex",
           gap: 8,
           alignItems: "center",
-          fontSize: 12
+          fontSize: 12,
         }}
       >
         <label>
           Mode{" "}
           <select
             value={currentMode}
-            onChange={(e) => setCurrentMode(e.target.value as any)}
+            onChange={(e) => {
+              setCurrentMode(e.target.value as any);
+              setRoute(null);
+            }}
           >
             <option value="driving">Driving</option>
             <option value="transit">Transit</option>
@@ -87,45 +146,83 @@ export default function TravelFilteredMap({
             type="number"
             min={1}
             value={currentMax}
-            onChange={(e) => setCurrentMax(Number(e.target.value))}
+            onChange={(e) => {
+              setCurrentMax(Number(e.target.value));
+              setRoute(null);
+            }}
             style={{ width: 60 }}
           />
         </label>
         <span style={{ opacity: 0.8 }}>
-          {loading
-            ? "Filtering…"
-            : `${meta?.matched?.toLocaleString() ?? 0} matches`}
+          {loading ? "Filtering…" : `${meta?.matched?.toLocaleString() ?? 0} matches`}
         </span>
+        {route && (
+          <button onClick={handleClearRoute} style={{ marginLeft: 8 }}>
+            Clear route
+          </button>
+        )}
       </div>
 
-      <LoadScript googleMapsApiKey={gmApiKey} libraries={["places"]}>
+      <LoadScript
+        googleMapsApiKey={gmApiKey}
+        libraries={[] /* no Places needed for this MVP */}
+      >
         <GoogleMap
+          onLoad={onLoad}
+          onUnmount={onUnmount}
           center={center}
           zoom={11}
           mapContainerStyle={{ width: "100%", height: "100%" }}
           options={mapOptions}
           onClick={onMapClick}
         >
-          {/* Origin */}
+          {/* Origin marker (draggable) */}
           <Marker
             position={origin}
             draggable
             onDragEnd={(e) => {
-              if (e.latLng) setOrigin({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+              if (e.latLng) {
+                setOrigin({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+                setRoute(null);
+              }
             }}
             label="●"
           />
 
-          {/* Only verified pins are shown */}
+          {/* Verified property pins */}
           {properties.map((p) => (
             <Marker
               key={p.id}
               position={{ lat: p.lat, lng: p.lng }}
+              onClick={() => setSelectedId(p.id)}
               title={`${p.address} • £${Math.round(p.price).toLocaleString()} • ${p.bedrooms} bed • ${Math.round(
                 (p.travelSeconds ?? 0) / 60
               )} min`}
             />
           ))}
+
+          {/* Pop-up */}
+          {selected && (
+            <InfoWindow
+              position={{ lat: selected.lat, lng: selected.lng }}
+              onCloseClick={() => setSelectedId(null)}
+            >
+              <div style={{ minWidth: 220 }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>{selected.address}</div>
+                <div>Postcode: {selected.postcode}</div>
+                <div>£{Math.round(selected.price).toLocaleString()} • {selected.bedrooms} bed</div>
+                <div>
+                  Travel time: {Math.round((selected.travelSeconds ?? 0) / 60)} min ({currentMode})
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <button onClick={handleShowRoute}>Show route</button>
+                </div>
+              </div>
+            </InfoWindow>
+          )}
+
+          {/* Route polyline */}
+          {route && <DirectionsRenderer directions={route} options={{ suppressMarkers: true }} />}
         </GoogleMap>
       </LoadScript>
     </div>
