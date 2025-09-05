@@ -1,89 +1,97 @@
-import { NextResponse } from "next/server";
+// src/app/api/directions/route.ts
+import { NextRequest, NextResponse } from "next/server";
 
-const KEY = process.env.GOOGLE_MAPS_SERVER_KEY!;
+const SERVER_KEY = process.env.GOOGLE_MAPS_SERVER_KEY!;
+if (!SERVER_KEY) {
+  console.warn("GOOGLE_MAPS_SERVER_KEY is missing");
+}
 
-/**
- * POST /api/directions
- * Body: {
- *   origin: { lat: number, lng: number },        // listing coords
- *   destination: { lat: number, lng: number },   // named place coords
- *   mode?: "transit" | "driving" | "walking" | "bicycling"  (default "transit")
- * }
- *
- * Returns:
- * {
- *   duration_min: number,
- *   steps: Array<
- *     | { type: "WALK", distance_m: number, duration_min: number, instruction: string }
- *     | { type: "TRANSIT", line: string, vehicle: string, headsign: string, num_stops: number,
- *         departure_stop: string, arrival_stop: string }
- *   >
- * }
- */
-export async function POST(req: Request) {
+type RouteStep =
+  | {
+      type: "TRANSIT";
+      vehicle: string;
+      line: string;
+      headsign: string;
+      num_stops: number;
+      departure_stop: string;
+      arrival_stop: string;
+      duration_min: number;
+    }
+  | {
+      type: "WALK" | "DRIVE";
+      instruction?: string;
+      distance_m?: number;
+      duration_min: number;
+    };
+
+type DirectionsResp = {
+  duration_min: number;
+  steps: RouteStep[];
+  error?: string;
+};
+
+export async function POST(req: NextRequest) {
   try {
-    const { origin, destination, mode = "transit" } = await req.json();
-    if (!origin?.lat || !origin?.lng || !destination?.lat || !destination?.lng) {
-      return NextResponse.json({ error: "missing_origin_or_destination" }, { status: 400 });
+    const { origin, destination, mode } = await req.json();
+    if (!origin || !destination) {
+      return NextResponse.json<DirectionsResp>({ error: "Missing coords" }, { status: 400 });
+    }
+    const travelMode =
+      mode === "walking" ? "walking" : mode === "bicycling" ? "bicycling" : mode === "driving" ? "driving" : "transit";
+
+    const url = new URL("https://maps.googleapis.com/maps/api/directions/json");
+    url.searchParams.set("origin", `${origin.lat},${origin.lng}`);
+    url.searchParams.set("destination", `${destination.lat},${destination.lng}`);
+    url.searchParams.set("mode", travelMode);
+    url.searchParams.set("region", "gb");
+    url.searchParams.set("key", SERVER_KEY);
+
+    const resp = await fetch(url.toString(), { cache: "no-store" });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => "");
+      throw new Error(`Directions error ${resp.status}: ${txt}`);
+    }
+    const j = await resp.json();
+
+    if (j.status !== "OK" || !j.routes?.[0]?.legs?.[0]) {
+      return NextResponse.json<DirectionsResp>({ error: j.status || "No route" }, { status: 400 });
     }
 
-    const params = new URLSearchParams({
-      key: KEY,
-      mode,
-      origin: `${origin.lat},${origin.lng}`,
-      destination: `${destination.lat},${destination.lng}`,
-      departure_time: "now", // better for transit
-    });
+    const leg = j.routes[0].legs[0];
+    const duration_min = Math.round((leg.duration?.value || 0) / 60);
 
-    const url = `https://maps.googleapis.com/maps/api/directions/json?${params.toString()}`;
-    const res = await fetch(url);
-    const json = await res.json();
-
-    const route = json?.routes?.[0];
-    const leg = route?.legs?.[0];
-    if (!leg) {
-      return NextResponse.json({ error: "no_route" }, { status: 404 });
-    }
-
-    const duration_min = Math.round((leg.duration_in_traffic?.value ?? leg.duration?.value ?? 0) / 60);
-
-    const steps = (leg.steps || []).map((s: any) => {
-      const smode = s.travel_mode;
-      if (smode === "WALKING") {
+    const steps: RouteStep[] = (leg.steps || []).map((s: any) => {
+      if (s.travel_mode === "TRANSIT" && s.transit_details) {
+        const td = s.transit_details;
         return {
-          type: "WALK" as const,
-          distance_m: s.distance?.value ?? 0,
-          duration_min: Math.round((s.duration?.value ?? 0) / 60),
-          instruction: s.html_instructions?.replace(/<[^>]+>/g, "") || "Walk",
+          type: "TRANSIT",
+          vehicle: td.line?.vehicle?.name || "Transit",
+          line: td.line?.short_name || td.line?.name || "",
+          headsign: td.headsign || "",
+          num_stops: td.num_stops || 0,
+          departure_stop: td.departure_stop?.name || "",
+          arrival_stop: td.arrival_stop?.name || "",
+          duration_min: Math.round((s.duration?.value || 0) / 60),
+        };
+      } else if (s.travel_mode === "WALKING") {
+        return {
+          type: "WALK",
+          instruction: s.html_instructions?.replace(/<[^>]+>/g, ""),
+          distance_m: s.distance?.value,
+          duration_min: Math.round((s.duration?.value || 0) / 60),
+        };
+      } else {
+        return {
+          type: "DRIVE",
+          instruction: s.html_instructions?.replace(/<[^>]+>/g, ""),
+          distance_m: s.distance?.value,
+          duration_min: Math.round((s.duration?.value || 0) / 60),
         };
       }
-      if (smode === "TRANSIT") {
-        const det = s.transit_details || {};
-        const line = det.line?.short_name || det.line?.name || "Transit";
-        const vehicle = det.line?.vehicle?.name || det.line?.vehicle?.type || "Transit";
-        const headsign = det.headsign || "";
-        const num_stops = det.num_stops ?? 0;
-        return {
-          type: "TRANSIT" as const,
-          line,
-          vehicle,
-          headsign,
-          num_stops,
-          departure_stop: det.departure_stop?.name || "",
-          arrival_stop: det.arrival_stop?.name || "",
-        };
-      }
-      // driving/bicycling fallback
-      return {
-        type: "WALK" as const,
-        distance_m: s.distance?.value ?? 0,
-        duration_min: Math.round((s.duration?.value ?? 0) / 60),
-        instruction: s.html_instructions?.replace(/<[^>]+>/g, "") || smode,
-      };
     });
 
-    return NextResponse.json({ duration_min, steps });
+    return NextResponse.json<DirectionsResp>({ duration_min, steps });
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "directions_failed" }, { status: 500 });
+    return NextResponse.json<DirectionsResp>({ error: e?.message || "Directions failed" }, { status: 500 });
   }
 }
