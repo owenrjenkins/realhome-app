@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import dynamic from "next/dynamic";
+import nextDynamic from "next/dynamic"; // ← renamed to avoid collision
 import LoadingSpinner from "@/components/LoadingSpinner";
 import ErrorBanner from "@/components/ErrorBanner";
 import Badge from "@/components/Badge";
@@ -10,12 +10,12 @@ import NarrativePanel from "@/components/NarrativePanel";
 import { lookupNearestArea } from "@/lib/areaCatalog";
 import { buildNarrative, buildAreaBullets } from "@/lib/narrative";
 
-// ── IMPORTANT: disable prerender for this page ──────────────────────────────
+// ── Disable prerender for this page ─────────────────────────────────────────
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 // Load Map only on the client (prevents SSR/prerender errors)
-const Map = dynamic(() => import("@/components/Map"), { ssr: false });
+const Map = nextDynamic(() => import("@/components/Map"), { ssr: false });
 
 // ---------- geo helpers ----------
 const UK_BBOX = { minLat: 49.0, maxLat: 59.5, minLng: -8.5, maxLng: 2.5 };
@@ -42,7 +42,7 @@ function ensureId(L: any) {
 function parseCommuteFromText(text: string) {
   const t = (text || "").toLowerCase();
 
-  let minsFallback = 60; // default in this variant
+  let minsFallback = 60;
   let minMins: number | undefined;
   let maxMins: number | undefined;
 
@@ -91,7 +91,7 @@ function parseBudgetBeds(text: string) {
   const between = t.match(/between\s*(\d+)(k|m)?\s*(?:and|to|-)\s*(\d+)(k|m)?/);
   if (between) {
     const a = Number(between[1]) * (between[2] === "m" ? 1_000_000 : between[2] === "k" ? 1_000 : 1);
-    const b = Number(between[3]) * (between[4] === "m" ? 1_000_000 : between[4] === "k" ? 1_000 : 1);
+    const b = Number(between[3]) * (between[4] === "m" ? 1_000_000 : 1_000);
     minBudget = Math.min(a, b);
     maxBudget = Math.max(a, b);
   }
@@ -154,13 +154,13 @@ export default function Page() {
       const L: ListingExt = { ...(raw as any), id, latitude, longitude, price_gbp: price, _mins: commute };
 
       if (minBudget && price < minBudget) continue;
-      if (maxBudget && price > (maxBudget * 1.10)) continue; // > +10% over = reject
+      if (maxBudget && price > maxBudget * 1.1) continue; // > +10% over = reject
       if (beds && (L as any).bedrooms < beds) continue;
 
       const timeOkStrict = typeof commute === "number" ? commute <= targetMaxMins : true;
       const timeOkNear   = typeof commute === "number" ? commute <= Math.round(targetMaxMins * 1.2) : true;
       const budgetOkStrict = !maxBudget || price <= maxBudget;
-      const budgetOkNear   = !maxBudget || price <= (maxBudget * 1.10);
+      const budgetOkNear   = !maxBudget || price <= maxBudget * 1.1;
 
       if (timeOkStrict && budgetOkStrict) strictArr.push(L);
       else if (timeOkNear && budgetOkNear) nearArr.push(L);
@@ -226,7 +226,6 @@ export default function Page() {
     setLoading(true);
 
     try {
-      // 1) Geocode destination (UK bias)
       const { dest, mode } = parseCommuteFromText(text);
       const destQuery = /,\s*(uk|united kingdom|great britain)/i.test(dest) ? dest : `${dest}, UK`;
       const g = await fetch("/api/geocode", {
@@ -242,7 +241,6 @@ export default function Page() {
       const anchor = { lat: gjson.lat, lng: gjson.lng, name: gjson.name || dest };
       setDestination(anchor);
 
-      // 2) Compute commute times for nearby candidates (≤25km)
       if (listings) {
         const radiusKm = 25;
         const nearby = listings
@@ -309,17 +307,14 @@ export default function Page() {
 
       {destination && (
         <div className="max-w-7xl mx-auto grid md:grid-cols-3 gap-6 p-6">
-          {/* Narrative */}
           <div className="md:col-span-3">
             <NarrativePanel text={narrativeText} bullets={areaBullets} />
           </div>
 
-          {/* Map */}
           <div className="md:col-span-2" style={{ minHeight: 560 }}>
             <Map origin={{ lat: destination.lat, lng: destination.lng }} mode={mode} listings={mapListings} height={560} />
           </div>
 
-          {/* Best matches */}
           <div className="space-y-4">
             <h2 className="text-lg font-semibold">Best matches</h2>
             {strict.slice(0, 10).map((L) => (
