@@ -24,11 +24,7 @@ type Props = {
   initialOrigin?: LatLng;
   mode?: TravelMode;
   maxMins?: number;
-  filters?: {
-    priceMin?: number;
-    priceMax?: number;
-    bedroomsMin?: number;
-    bedroomsMax?: number;
+  filters?: Filters;
 };
 
 export default function TravelFilteredMap({
