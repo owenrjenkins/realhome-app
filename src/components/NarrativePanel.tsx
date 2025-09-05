@@ -1,43 +1,41 @@
+// src/components/NarrativePanel.tsx
 "use client";
 
 type Bullet = { title: string; blurb: string; count?: number; tags?: string[] };
 
 export default function NarrativePanel({
   text,
-  bullets,
+  bullets = [],
 }: {
   text: string;
-  bullets: Bullet[];
+  bullets?: Bullet[];
 }) {
   return (
-    <div className="p-4 rounded-xl border bg-white shadow-sm space-y-3">
-      <div className="prose prose-sm max-w-none">
-        <p
-          dangerouslySetInnerHTML={{
-            __html: text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>"),
-          }}
-        />
+    <div className="space-y-3">
+      <div className="rounded-xl border bg-white p-4 leading-relaxed text-sm">
+        {text}
       </div>
-      <ul className="space-y-3">
-        {bullets.map((b, i) => (
-          <li key={i} className="p-3 rounded-lg border bg-white/60">
-            <div className="font-semibold">{b.title}</div>
+
+      {bullets.length > 0 &&
+        bullets.map((b, i) => (
+          <div key={i} className="rounded-xl border bg-white p-3">
+            <div className="font-semibold">
+              {b.title}
+              {typeof b.count === "number" ? ` — ${b.count} listings` : ""}
+            </div>
             <div className="text-sm text-gray-700">{b.blurb}</div>
-            {!!b.tags?.length && (
-              <div className="mt-1 flex flex-wrap gap-2">
-                {b.tags.map((t, i2) => (
-                  <span
-                    key={i2}
-                    className="text-xs px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border"
-                  >
-                    {t}
-                  </span>
-                ))}
-              </div>
-            )}
-          </li>
+            <div className="mt-2 flex gap-2 flex-wrap">
+              {(b.tags || []).map((t, j) => (
+                <span
+                  key={j}
+                  className="text-xs rounded-full border px-2 py-0.5 bg-gray-50"
+                >
+                  {t}
+                </span>
+              ))}
+            </div>
+          </div>
         ))}
-      </ul>
     </div>
   );
 }
