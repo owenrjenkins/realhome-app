@@ -1,15 +1,15 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import Script from "next/script";
+import { useEffect, useRef, useState } from "react";
+import { Loader } from "@googlemaps/js-api-loader";
 
 type LatLng = { lat: number; lng: number };
 
-export type Listing = {
-  id: string | number;
+type MapListing = {
+  id: string;
   latitude: number;
   longitude: number;
-  price_gbp?: number;
+  price_gbp: number;
   bedrooms?: number;
   address_line?: string;
   postcode?: string;
@@ -18,238 +18,142 @@ export type Listing = {
 };
 
 type Props = {
-  origin: LatLng;                         // destination/work
-  mode?: "driving" | "transit" | "walking" | "bicycling";
-  listings: Listing[];                    // all (we’ll cap shown pins)
-  height?: number | string;               // map height
+  origin: LatLng; // the destination/work anchor we centered on
+  mode: "driving" | "transit" | "walking" | "bicycling";
+  listings: MapListing[]; // already filtered “strict” list
+  height?: number;
 };
 
-export default function Map({ origin, mode = "driving", listings, height = 560 }: Props) {
-  const apiKey = (process.env.NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY || "").trim();
+export default function Map({ origin, mode, listings, height = 560 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-
-  // Google objects we create (kept in refs so they survive re-renders)
   const mapRef = useRef<google.maps.Map | null>(null);
   const markersRef = useRef<google.maps.Marker[]>([]);
   const infoRef = useRef<google.maps.InfoWindow | null>(null);
-  const dirSvcRef = useRef<google.maps.DirectionsService | null>(null);
-  const dirRendererRef = useRef<google.maps.DirectionsRenderer | null>(null);
-  const placesSvcRef = useRef<google.maps.places.PlacesService | null>(null);
+  const [err, setErr] = useState<string>("");
 
-  const [scriptReady, setScriptReady] = useState(false);
-  const [pinsCount, setPinsCount] = useState(0);
-
-  // Defensive: don’t try to render if there’s no key
-  if (!apiKey) {
-    return (
-      <div style={{ padding: 12, height, borderRadius: 12, border: "1px solid #e5e7eb" }}>
-        <b>Map can’t load:</b> missing <code>NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY</code>.
-      </div>
-    );
-  }
-
-  // Keep a clean, capped list of pins (avoid NaNs, keep performance)
-  const pins = useMemo(() => {
-    const clean = listings.filter(
-      (l) =>
-        Number.isFinite(l.latitude) &&
-        Number.isFinite(l.longitude) &&
-        Math.abs(l.latitude) <= 90 &&
-        Math.abs(l.longitude) <= 180
-    );
-    return clean.slice(0, 2000);
-  }, [listings]);
-
-  useEffect(() => setPinsCount(pins.length), [pins.length]);
-
-  // Initialize the map once the script has loaded
   useEffect(() => {
-    if (!scriptReady) return;
-    if (!containerRef.current) return;
+    let isCancelled = false;
 
-    // Create the map only once
-    if (!mapRef.current) {
-      mapRef.current = new google.maps.Map(containerRef.current, {
-        center: origin,
-        zoom: 11,
-        clickableIcons: false,
-        streetViewControl: false,
-        mapTypeControl: false,
-        zoomControl: true,
-        gestureHandling: "greedy",
-      });
-      infoRef.current = new google.maps.InfoWindow();
-      dirSvcRef.current = new google.maps.DirectionsService();
-      dirRendererRef.current = new google.maps.DirectionsRenderer({ suppressMarkers: true });
-      dirRendererRef.current.setMap(mapRef.current);
-      placesSvcRef.current = new google.maps.places.PlacesService(mapRef.current);
-    } else {
-      // Re-center when origin changes
-      mapRef.current.setCenter(origin);
-    }
-  }, [scriptReady, origin.lat, origin.lng]);
+    async function init() {
+      try {
+        const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+        if (!apiKey) {
+          setErr("Missing NEXT_PUBLIC_GOOGLE_MAPS_API_KEY");
+          return;
+        }
 
-  // Render/update markers whenever pins change
-  useEffect(() => {
-    if (!mapRef.current) return;
+        const loader = new Loader({
+          apiKey,
+          version: "weekly",
+          libraries: ["places"],
+        });
 
-    // Clear old markers
-    for (const m of markersRef.current) m.setMap(null);
-    markersRef.current = [];
+        await loader.load();
 
-    const map = mapRef.current;
+        if (isCancelled) return;
 
-    pins.forEach((p) => {
-      const marker = new google.maps.Marker({
-        map,
-        position: { lat: p.latitude, lng: p.longitude },
-        title: `${p.address_line ?? p.postcode ?? ""}`,
-      });
+        // Initialize map once
+        if (!mapRef.current && containerRef.current) {
+          mapRef.current = new google.maps.Map(containerRef.current, {
+            center: origin,
+            zoom: 10,
+            mapTypeControl: false,
+            streetViewControl: false,
+            fullscreenControl: false,
+          });
 
-      marker.addListener("click", () => {
-        // Build initial content
-        const price = Number(p.price_gbp ?? 0);
-        const commute = typeof p.commute_mins === "number" ? `${p.commute_mins} min` : "n/a";
-        let content = `
-          <div style="min-width:240px">
-            <div style="font-weight:600;margin-bottom:4px">${escapeHtml(p.address_line ?? p.postcode ?? "Listing")}</div>
-            <div>£${Math.round(price).toLocaleString()} • ${p.bedrooms ?? "?"} bed</div>
-            <div>Commute: ${commute} (${mode})</div>
-            <div style="margin-top:8px;font-weight:600">Nearby</div>
-            <div>Park: <span id="nearby-park">searching…</span></div>
-            <div>Supermarket: <span id="nearby-supermarket">searching…</span></div>
-            <div style="margin-top:8px;font-weight:600">Route</div>
-            <div id="route-status">fetching route…</div>
-          </div>
-        `;
-        infoRef.current!.setContent(content);
-        infoRef.current!.open(map, marker);
+          infoRef.current = new google.maps.InfoWindow();
+        }
 
-        // Kick off route + nearby in parallel
-        drawRoute({ lat: p.latitude, lng: p.longitude });
-        fetchNearby({ lat: p.latitude, lng: p.longitude });
-      });
+        // Center the map on origin each search
+        if (mapRef.current) {
+          mapRef.current.setCenter(origin);
+        }
 
-      markersRef.current.push(marker);
-    });
-  }, [pins, mode]);
+        // Clear old markers
+        markersRef.current.forEach((m) => m.setMap(null));
+        markersRef.current = [];
 
-  // Draw a route polyline (Directions API). Fails soft if disabled.
-  async function drawRoute(dest: LatLng) {
-    const map = mapRef.current;
-    const svc = dirSvcRef.current;
-    const renderer = dirRendererRef.current;
-    if (!map || !svc || !renderer) return;
+        // Add origin marker (work/POI)
+        if (mapRef.current) {
+          const o = new google.maps.Marker({
+            position: origin,
+            map: mapRef.current,
+            icon: {
+              path: google.maps.SymbolPath.CIRCLE,
+              scale: 7,
+              fillColor: "#2563eb", // indigo-600
+              fillOpacity: 1,
+              strokeColor: "#ffffff",
+              strokeWeight: 2,
+            },
+            title: "Destination anchor",
+          });
+          markersRef.current.push(o);
+        }
 
-    try {
-      const res = await svc.route({
-        origin: new google.maps.LatLng(origin.lat, origin.lng),
-        destination: new google.maps.LatLng(dest.lat, dest.lng),
-        travelMode:
-          mode === "transit"
-            ? google.maps.TravelMode.TRANSIT
-            : mode === "walking"
-            ? google.maps.TravelMode.WALKING
-            : mode === "bicycling"
-            ? google.maps.TravelMode.BICYCLING
-            : google.maps.TravelMode.DRIVING,
-      });
-      renderer.setDirections(res);
-      replaceInInfo("route-status", res.routes?.[0]?.summary || "route ready");
-    } catch {
-      replaceInInfo("route-status", "route unavailable");
-    }
-  }
+        // Add listing markers
+        if (mapRef.current && infoRef.current) {
+          const bounds = new google.maps.LatLngBounds();
+          bounds.extend(origin);
 
-  // Find one nearby park and supermarket using Places
-  async function fetchNearby(pos: LatLng) {
-    const svc = placesSvcRef.current;
-    const map = mapRef.current;
-    if (!svc || !map) {
-      replaceInInfo("nearby-park", "n/a");
-      replaceInInfo("nearby-supermarket", "n/a");
-      return;
-    }
+          listings.forEach((L) => {
+            const pos = { lat: L.latitude, lng: L.longitude };
+            const marker = new google.maps.Marker({
+              position: pos,
+              map: mapRef.current!,
+              title: `£${(L.price_gbp || 0).toLocaleString()} — ${L.postcode ?? ""}`,
+            });
 
-    const findOne = (type: google.maps.places.PlaceType) =>
-      new Promise<string | undefined>((resolve) => {
-        svc.nearbySearch(
-          { location: new google.maps.LatLng(pos.lat, pos.lng), radius: 1200, type },
-          (results, status) => {
-            if (status !== google.maps.places.PlacesServiceStatus.OK || !results?.length) {
-              resolve(undefined);
-            } else {
-              resolve(results[0].name);
-            }
+            marker.addListener("click", () => {
+              const commuteText =
+                typeof L.commute_mins === "number" ? `${L.commute_mins} min ${mode}` : "Commute pending";
+              const html = `
+                <div style="font: 13px system-ui, -apple-system, Segoe UI, Roboto, Arial">
+                  <div style="font-weight:600;margin-bottom:2px">£${(L.price_gbp || 0).toLocaleString()} · ${
+                L.bedrooms ?? "?"} bed</div>
+                  <div style="color:#374151">${(L.address_line ?? "").toString()} ${L.postcode ?? ""} ${L.city ?? ""}</div>
+                  <div style="margin-top:4px;color:#111827"><strong>Commute:</strong> ${commuteText}</div>
+                </div>
+              `;
+              infoRef.current!.setContent(html);
+              infoRef.current!.open({ map: mapRef.current!, anchor: marker });
+            });
+
+            markersRef.current.push(marker);
+            bounds.extend(pos);
+          });
+
+          // Fit bounds (keep a sensible zoom)
+          if (listings.length > 0) {
+            mapRef.current.fitBounds(bounds);
+            // optional: prevent over-zooming on tight clusters
+            const listener = google.maps.event.addListenerOnce(mapRef.current, "bounds_changed", () => {
+              if (mapRef.current!.getZoom()! > 13) mapRef.current!.setZoom(13);
+              google.maps.event.removeListener(listener);
+            });
           }
-        );
-      });
-
-    try {
-      const [park, supermarket] = await Promise.all([findOne("park"), findOne("supermarket")]);
-      replaceInInfo("nearby-park", park ?? "none found");
-      replaceInInfo("nearby-supermarket", supermarket ?? "none found");
-    } catch {
-      replaceInInfo("nearby-park", "n/a");
-      replaceInInfo("nearby-supermarket", "n/a");
+        }
+      } catch (e: any) {
+        console.error(e);
+        setErr(e?.message || "Map failed to load");
+      }
     }
-  }
 
-  // Helper: update placeholder spans inside the current InfoWindow content
-  function replaceInInfo(spanId: string, text: string) {
-    // InfoWindow content lives in the DOM; we can target by ID
-    const iw = document.querySelector(`#${spanId}`);
-    if (iw) iw.textContent = text;
-  }
+    init();
+    return () => {
+      isCancelled = true;
+    };
+  }, [origin, mode, listings]);
 
   return (
-    <div style={{ width: "100%", height, position: "relative" }}>
-      {/* Tiny status pill */}
-      <div
-        style={{
-          position: "absolute",
-          top: 8,
-          left: 8,
-          zIndex: 2,
-          background: "rgba(255,255,255,0.95)",
-          padding: "6px 10px",
-          borderRadius: 12,
-          boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
-          fontSize: 12,
-        }}
-      >
-        Rendering {pinsCount.toLocaleString()} pins
-      </div>
-
-      {/* The map goes here */}
-      <div
-        ref={containerRef}
-        style={{
-          width: "100%",
-          height: "100%",
-          border: "1px solid #e5e7eb",
-          borderRadius: 12,
-          background: "#f8fafc",
-        }}
-      />
-
-      {/* Load Google Maps JS once; add Places for “Nearby” */}
-      <Script
-        id="google-maps"
-        src={`https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places&v=weekly`}
-        strategy="afterInteractive"
-        onLoad={() => setScriptReady(true)}
-      />
+    <div className="w-full">
+      {err && (
+        <div className="mb-2 rounded-lg border border-red-200 bg-red-50 text-red-700 px-3 py-2 text-sm">
+          {err}
+        </div>
+      )}
+      <div ref={containerRef} style={{ width: "100%", height }} />
     </div>
   );
-}
-
-// Simple HTML escaper for InfoWindow content
-function escapeHtml(s: string) {
-  return s
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
 }
