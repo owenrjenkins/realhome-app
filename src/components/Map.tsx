@@ -1,147 +1,219 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader } from "@googlemaps/js-api-loader";
 
 type LatLng = { lat: number; lng: number };
 
-export type MapListing = {
+type Listing = {
   id: string;
   latitude: number;
   longitude: number;
   price_gbp: number;
-  bedrooms?: number;
-  address_line?: string;
+  bedrooms: number;
+  property_type: string;
   postcode?: string;
   city?: string;
-  commute_mins?: number; // optional, shown if present
+  _mins?: number;
 };
 
-type Props = {
-  origin: LatLng;
-  mode: "driving" | "transit" | "walking" | "bicycling";
-  listings: MapListing[];
-  height?: number;
-  onSelect?: (listing: MapListing) => void; // <-- new
-};
+export type MapController = { focusOn: (id: string) => void };
 
-export default function Map({ origin, mode, listings, height = 560, onSelect }: Props) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
+export default function Map({
+  center,
+  listings,
+  durations,
+  onSelect,
+  onReady,
+}: {
+  center: LatLng | null;
+  listings: Listing[];
+  durations: Record<string, number>;
+  onSelect: (l: Listing) => void;
+  onReady?: (ctl: MapController) => void;
+}) {
+  const mapDivRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
-  const markersRef = useRef<google.maps.Marker[]>([]);
+  const markersRef = useRef<Record<string, google.maps.Marker>>({});
   const infoRef = useRef<google.maps.InfoWindow | null>(null);
-  const [err, setErr] = useState<string>("");
 
+  const [loadErr, setLoadErr] = useState<string>("");
+
+  // ---- helpers ----
+  function isValidLatLng(v: any): v is LatLng {
+    return (
+      v &&
+      typeof v === "object" &&
+      Number.isFinite(v.lat) &&
+      Number.isFinite(v.lng) &&
+      Math.abs(v.lat) <= 90 &&
+      Math.abs(v.lng) <= 180
+    );
+  }
+
+  const safeCenter = useMemo<LatLng | null>(() => {
+    return isValidLatLng(center) ? center : null;
+  }, [center]);
+
+  const safeListings = useMemo(() => {
+    return (listings || []).filter(
+      (L) =>
+        Number.isFinite(L.latitude) &&
+        Number.isFinite(L.longitude) &&
+        Math.abs(L.latitude) <= 90 &&
+        Math.abs(L.longitude) <= 180
+    );
+  }, [listings]);
+
+  // ---- load Google Maps once ----
   useEffect(() => {
-    let isCancelled = false;
+    setLoadErr("");
 
-    async function init() {
-      try {
-        const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
-        if (!apiKey) {
-          setErr("Missing NEXT_PUBLIC_GOOGLE_MAPS_API_KEY");
-          return;
-        }
+    if (!mapDivRef.current) return;
+    if (!safeCenter) return; // wait until we have a valid center
 
-        const loader = new Loader({ apiKey, version: "weekly", libraries: ["places"] });
-        await loader.load();
-        if (isCancelled) return;
+    // If map already created, just recentre and continue
+    if (mapRef.current) {
+      mapRef.current.setCenter(safeCenter);
+      return;
+    }
 
-        if (!mapRef.current && containerRef.current) {
-          mapRef.current = new google.maps.Map(containerRef.current, {
-            center: origin,
-            zoom: 10,
-            mapTypeControl: false,
-            streetViewControl: false,
-            fullscreenControl: false,
-          });
-          infoRef.current = new google.maps.InfoWindow();
-        }
+    const apiKey =
+      process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ||
+      process.env.NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY;
 
-        if (!mapRef.current || !infoRef.current) return;
+    if (!apiKey) {
+      setLoadErr("Missing NEXT_PUBLIC_GOOGLE_MAPS_API_KEY");
+      return;
+    }
 
-        mapRef.current.setCenter(origin);
+    const loader = new Loader({
+      apiKey,
+      version: "weekly",
+      libraries: ["places"],
+    });
 
-        // clear markers
-        markersRef.current.forEach((m) => m.setMap(null));
-        markersRef.current = [];
+    loader
+      .load()
+      .then(() => {
+        // Construct map
+        mapRef.current = new google.maps.Map(mapDivRef.current as HTMLDivElement, {
+          center: safeCenter,
+          zoom: 12,
+          mapTypeControl: false,
+          fullscreenControl: false,
+          streetViewControl: false,
+        });
+        infoRef.current = new google.maps.InfoWindow();
 
-        // origin marker
-        const originMarker = new google.maps.Marker({
-          position: origin,
-          map: mapRef.current,
-          icon: {
-            path: google.maps.SymbolPath.CIRCLE,
-            scale: 7,
-            fillColor: "#2563eb",
-            fillOpacity: 1,
-            strokeColor: "#ffffff",
-            strokeWeight: 2,
+        // hand controller to parent
+        onReady?.({
+          focusOn: (id: string) => {
+            const mk = markersRef.current[id];
+            if (mk && mapRef.current) {
+              mapRef.current.panTo(mk.getPosition()!);
+              mapRef.current.setZoom(Math.max(mapRef.current.getZoom() ?? 12, 14));
+              google.maps.event.trigger(mk, "click", {});
+            }
           },
-          title: "Destination anchor",
         });
-        markersRef.current.push(originMarker);
-
-        // listing markers
-        const bounds = new google.maps.LatLngBounds();
-        bounds.extend(origin);
-
-        listings.forEach((L) => {
-          const pos = { lat: L.latitude, lng: L.longitude };
-          const marker = new google.maps.Marker({
-            position: pos,
-            map: mapRef.current!,
-            title: `£${(L.price_gbp || 0).toLocaleString()} — ${L.postcode ?? ""}`,
-          });
-
-          marker.addListener("click", () => {
-            const commuteText =
-              typeof L.commute_mins === "number" ? `${L.commute_mins} min ${mode}` : "Commute pending";
-            const html = `
-              <div style="font:13px system-ui,-apple-system,Segoe UI,Roboto,Arial">
-                <div style="font-weight:600;margin-bottom:2px">£${(L.price_gbp || 0).toLocaleString()} · ${L.bedrooms ?? "?"} bed</div>
-                <div style="color:#374151">${(L.address_line ?? "").toString()} ${L.postcode ?? ""} ${L.city ?? ""}</div>
-                <div style="margin-top:4px;color:#111827"><strong>Commute:</strong> ${commuteText}</div>
-                <div style="margin-top:6px"><button id="__pin_details_btn" style="padding:6px 10px;border:1px solid #e5e7eb;border-radius:8px;background:#fff;cursor:pointer">View details</button></div>
-              </div>
-            `;
-            infoRef.current!.setContent(html);
-            infoRef.current!.open({ map: mapRef.current!, anchor: marker });
-
-            // wire "View details"
-            google.maps.event.addListenerOnce(infoRef.current!, "domready", () => {
-              const btn = document.getElementById("__pin_details_btn");
-              btn?.addEventListener("click", () => onSelect?.(L));
-            });
-          });
-
-          markersRef.current.push(marker);
-          bounds.extend(pos);
-        });
-
-        if (listings.length > 0) {
-          mapRef.current.fitBounds(bounds);
-          const listener = google.maps.event.addListenerOnce(mapRef.current, "bounds_changed", () => {
-            if (mapRef.current!.getZoom()! > 13) mapRef.current!.setZoom(13);
-            google.maps.event.removeListener(listener);
-          });
-        }
-      } catch (e: any) {
+      })
+      .catch((e) => {
         console.error(e);
-        setErr(e?.message || "Map failed to load");
+        setLoadErr("Failed to load Google Maps");
+      });
+  }, [safeCenter, onReady]);
+
+  // ---- draw / update markers whenever listings change ----
+  useEffect(() => {
+    if (!mapRef.current) return;
+
+    // clear markers that are no longer present
+    const keep: Record<string, true> = {};
+    for (const L of safeListings) keep[L.id] = true;
+    for (const id of Object.keys(markersRef.current)) {
+      if (!keep[id]) {
+        markersRef.current[id].setMap(null);
+        delete markersRef.current[id];
       }
     }
 
-    init();
-    return () => {
-      isCancelled = true;
-    };
-  }, [origin, mode, listings, onSelect]);
+    // add & update markers
+    for (const L of safeListings) {
+      const pos = { lat: Number(L.latitude), lng: Number(L.longitude) } as LatLng;
+      if (!isValidLatLng(pos)) continue;
+
+      let marker = markersRef.current[L.id];
+      if (!marker) {
+        marker = new google.maps.Marker({
+          position: pos,
+          map: mapRef.current!,
+          title: `${L.bedrooms} bed ${L.property_type} · £${(L.price_gbp || 0).toLocaleString()}`,
+        });
+        marker.addListener("click", () => {
+          onSelect(L);
+          // simple info window
+          const commute =
+            typeof L._mins === "number"
+              ? ` · Commute ${L._mins} min`
+              : durations[L.id]
+              ? ` · Commute ${durations[L.id]} min`
+              : "";
+          const html = `
+            <div style="font-size:12px;line-height:1.4;">
+              <div><strong>£${(L.price_gbp || 0).toLocaleString()}</strong> · ${
+            L.bedrooms
+          } bed ${L.property_type}</div>
+              <div>${L.postcode || ""} ${L.city ? ", " + L.city : ""}${commute}</div>
+            </div>`;
+          infoRef.current?.setContent(html);
+          infoRef.current?.open({ map: mapRef.current!, anchor: marker });
+        });
+        markersRef.current[L.id] = marker;
+      } else {
+        // update position & title if changed
+        const curr = marker.getPosition();
+        if (!curr || curr.lat() !== pos.lat || curr.lng() !== pos.lng) {
+          marker.setPosition(pos);
+        }
+        marker.setTitle(
+          `${L.bedrooms} bed ${L.property_type} · £${(L.price_gbp || 0).toLocaleString()}`
+        );
+      }
+    }
+  }, [safeListings, durations, onSelect]);
+
+  // ---- keep center in sync (after map is created) ----
+  useEffect(() => {
+    if (mapRef.current && safeCenter) {
+      mapRef.current.setCenter(safeCenter);
+    }
+  }, [safeCenter]);
+
+  // ---- UI ----
+  if (!safeCenter) {
+    // Don’t blow up – show a friendly note instead of throwing
+    return (
+      <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+        Waiting for a valid map center…
+      </div>
+    );
+  }
+
+  if (loadErr) {
+    return (
+      <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+        {loadErr}
+      </div>
+    );
+  }
 
   return (
-    <div className="w-full">
-      {err && <div className="mb-2 rounded-lg border border-red-200 bg-red-50 text-red-700 px-3 py-2 text-sm">{err}</div>}
-      <div ref={containerRef} style={{ width: "100%", height }} />
-    </div>
+    <div
+      ref={mapDivRef}
+      className="w-full h-[520px] rounded-xl border bg-gray-50"
+      // in case CSS fails somewhere, minimum height
+      style={{ minHeight: 400 }}
+    />
   );
 }
