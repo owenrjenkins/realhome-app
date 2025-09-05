@@ -34,65 +34,80 @@ function ensureId(L: any) {
   return `${lat},${lng},${price}`;
 }
 
-// ---------- parsing ----------
+// ---------- parsing (robust) ----------
 function parseCommuteFromText(text: string) {
-  const t = (text || "").toLowerCase();
+  const s = (text || "").toLowerCase();
 
+  // minutes: under/over/between or single “XX minutes”
   let minsFallback = 60;
   let minMins: number | undefined;
   let maxMins: number | undefined;
 
-  const under = t.match(/under\s*(\d+)\s*(?:min|mins|minutes)?/);
-  if (under) maxMins = Number(under[1]);
+  const underM = s.match(/\bunder\s*(\d+)\s*(?:min|mins|minutes)\b/);
+  if (underM) maxMins = Number(underM[1]);
 
-  const over = t.match(/over\s*(\d+)\s*(?:min|mins|minutes)?/);
-  if (over) minMins = Number(over[1]);
+  const overM = s.match(/\bover\s*(\d+)\s*(?:min|mins|minutes)\b/);
+  if (overM) minMins = Number(overM[1]);
 
-  const between = t.match(/between\s*(\d+)\s*(?:and|to|-)\s*(\d+)\s*(?:min|mins|minutes)?/);
-  if (between) {
-    minMins = Number(between[1]);
-    maxMins = Number(between[2]);
+  const betweenM = s.match(/\bbetween\s*(\d+)\s*(?:and|to|-)\s*(\d+)\s*(?:min|mins|minutes)\b/);
+  if (betweenM) {
+    minMins = Number(betweenM[1]);
+    maxMins = Number(betweenM[2]);
   }
 
-  const plain = t.match(/(\d+)\s*(?:min|mins|minutes)/);
-  if (plain && !minMins && !maxMins) minsFallback = Number(plain[1]);
+  const plainM = s.match(/\b(\d+)\s*(?:min|mins|minutes)\b/);
+  if (plainM && !minMins && !maxMins) minsFallback = Number(plainM[1]);
 
-  const destMatch = text.match(/to\s+(.+?)(?:\s+by|\s*[,.;]|$)/i);
-  const dest = destMatch?.[1]?.trim() || "City of London";
+  // destination: support "to X by ..." and "from X by ..."
+  const toMatch = text.match(/\bto\s+(.+?)(?:\s+by|\s*[,.;]|$)/i);
+  const fromMatch = text.match(/\bfrom\s+(.+?)(?:\s+by|\s*[,.;]|$)/i);
+  const dest = (toMatch?.[1] || fromMatch?.[1] || "City of London").trim();
 
+  // mode
   let mode: "driving" | "transit" | "walking" | "bicycling" = "transit";
-  if (/car|drive|driving/.test(t)) mode = "driving";
-  else if (/walk/.test(t)) mode = "walking";
-  else if (/bike|cycle/.test(t)) mode = "bicycling";
-  else if (/train|bus|transit|public/.test(t)) mode = "transit";
+  if (/\bcar|drive|driving\b/.test(s)) mode = "driving";
+  else if (/\bwalk|walking\b/.test(s)) mode = "walking";
+  else if (/\b(bike|cycle|cycling)\b/.test(s)) mode = "bicycling";
+  else if (/\b(train|bus|tube|tram|transit|public)\b/.test(s)) mode = "transit";
 
   return { minsFallback, minMins, maxMins, dest, mode };
 }
 
 function parseBudgetBeds(text: string) {
-  const t = (text || "").toLowerCase().replace(/[,£]/g, "").replace(/\s+/g, " ");
+  const s = (text || "").toLowerCase();
+
+  // Helpers
+  const toNumber = (num: string, unit?: string) => {
+    const n = Number(num);
+    if (unit === "m") return Math.round(n * 1_000_000);
+    if (unit === "k") return Math.round(n * 1_000);
+    return Math.round(n);
+  };
+
   let minBudget: number | undefined;
   let maxBudget: number | undefined;
 
-  const under = t.match(/under\s*(\d+)(k|m)?/);
-  if (under) {
-    const n = Number(under[1]);
-    maxBudget = under[2] === "m" ? n * 1_000_000 : under[2] === "k" ? n * 1_000 : n;
-  }
-  const over = t.match(/over\s*(\d+)(k|m)?/);
-  if (over) {
-    const n = Number(over[1]);
-    minBudget = over[2] === "m" ? n * 1_000_000 : over[2] === "k" ? n * 1_000 : n;
-  }
-  const between = t.match(/between\s*(\d+)(k|m)?\s*(?:and|to|-)\s*(\d+)(k|m)?/);
-  if (between) {
-    const a = Number(between[1]) * (between[2] === "m" ? 1_000_000 : between[2] === "k" ? 1_000 : 1);
-    const b = Number(between[3]) * (between[4] === "m" ? 1_000_000 : 1_000);
+  // Only treat a number as money if it’s prefixed with £ or suffixed with k/m,
+  // and IGNORE numbers followed by "minutes".
+  const UNDER_RE = /\bunder\s*£?\s*(\d+(?:\.\d+)?)\s*(k|m)?\b(?!\s*(?:min|mins|minutes))/i;
+  const OVER_RE = /\bover\s*£?\s*(\d+(?:\.\d+)?)\s*(k|m)?\b(?!\s*(?:min|mins|minutes))/i;
+  const BETWEEN_RE = /\bbetween\s*£?\s*(\d+(?:\.\d+)?)\s*(k|m)?\s*(?:and|to|-)\s*£?\s*(\d+(?:\.\d+)?)\s*(k|m)?\b(?!\s*(?:min|mins|minutes))/i;
+
+  const mBetween = s.match(BETWEEN_RE);
+  if (mBetween) {
+    const a = toNumber(mBetween[1], mBetween[2] as any);
+    const b = toNumber(mBetween[3], mBetween[4] as any);
     minBudget = Math.min(a, b);
     maxBudget = Math.max(a, b);
+  } else {
+    const mUnder = s.match(UNDER_RE);
+    if (mUnder) maxBudget = toNumber(mUnder[1], mUnder[2] as any);
+    const mOver = s.match(OVER_RE);
+    if (mOver) minBudget = toNumber(mOver[1], mOver[2] as any);
   }
 
-  const bm = t.match(/(\d+)\s*(?:bed|beds|bedroom|bedrooms)/i);
+  // Beds
+  const bm = s.match(/(\d+)\s*(?:bed|beds|bedroom|bedrooms)\b/i);
   const beds = bm ? Number(bm[1]) : undefined;
 
   return { minBudget, maxBudget, beds };
@@ -168,7 +183,7 @@ export default function HomeClient() {
     return { strict: strictArr.slice(0, 50), nearMiss: nearArr.slice(0, 50) };
   }, [listings, destination, durations, minsFallback, maxMins, minBudget, maxBudget, beds, targetMaxMins]);
 
-  // Narrative aggregation by area (NO .values() / iterators — object-only)
+  // Narrative aggregation by area (object-only to avoid iterator issues)
   const topAreas = useMemo(() => {
     type AreaAgg = { key: string; area: ReturnType<typeof lookupNearestArea> | null; count: number };
     const agg: Record<string, AreaAgg> = {};
@@ -185,7 +200,6 @@ export default function HomeClient() {
 
     const arr = Object.keys(agg).map((k) => agg[k]);
     arr.sort((a, b) => b.count - a.count);
-    // Output shape: { area, count }
     return arr.map(({ area, count }) => ({ area, count }));
   }, [strict, nearMiss]);
 
@@ -240,6 +254,7 @@ export default function HomeClient() {
 
     try {
       const { dest, mode } = parseCommuteFromText(text);
+      // UK bias
       const destQuery = /,\s*(uk|united kingdom|great britain)/i.test(dest) ? dest : `${dest}, UK`;
       const g = await fetch("/api/geocode", {
         method: "POST",
