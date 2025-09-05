@@ -267,37 +267,47 @@ export default function Map({
   }
 
   // ---------- Directions polyline with timeouts + fallbacks ----------
-  async function drawRoute(from: LatLng, to: LatLng, preferred: "driving" | "transit" | "walking" | "bicycling") {
-    if (!mapRef.current || !directionsRendererRef.current) return;
-    const svc = new google.maps.DirectionsService();
-    const modes = Array.from(new Set<google.maps.TravelMode>([
-      travelModeToGoogle(preferred),
-      google.maps.TravelMode.DRIVING,
-      google.maps.TravelMode.WALKING,
-    ]));
-    for (const m of modes) {
-      try {
-        const req: google.maps.DirectionsRequest = {
-          origin: new google.maps.LatLng(from.lat, from.lng),
-          destination: new google.maps.LatLng(to.lat, to.lng),
-          travelMode: m,
-          ...(m === google.maps.TravelMode.TRANSIT ? { transitOptions: { departureTime: new Date() } } : {}),
-        };
-        const res = (await Promise.race([
-          svc.route(req),
-          new Promise<google.maps.DirectionsResult>((_, reject) => setTimeout(() => reject(new Error("directions_timeout")), 9000)),
-        ])) as google.maps.DirectionsResult;
-        if (res?.routes?.length) {
-          directionsRendererRef.current.setDirections(res);
-          return;
-        }
-      } catch {
-        // try next
+function drawRoute(from: LatLng | null, to: LatLng, preferred: "driving"|"transit"|"walking"|"bicycling") {
+  if (!mapRef.current || !directionsRendererRef.current || !from) return;
+
+  const svc = new google.maps.DirectionsService();
+  const tryModes: google.maps.TravelMode[] = Array.from(new Set([
+    preferred === "walking" ? google.maps.TravelMode.WALKING
+    : preferred === "bicycling" ? google.maps.TravelMode.BICYCLING
+    : preferred === "transit" ? google.maps.TravelMode.TRANSIT
+    : google.maps.TravelMode.DRIVING,
+    google.maps.TravelMode.DRIVING,
+    google.maps.TravelMode.WALKING,
+  ]));
+
+  (async () => {
+    for (const m of tryModes) {
+      const req: google.maps.DirectionsRequest = {
+        origin: new google.maps.LatLng(from.lat, from.lng),
+        destination: new google.maps.LatLng(to.lat, to.lng),
+        travelMode: m,
+        ...(m === google.maps.TravelMode.TRANSIT ? { transitOptions: { departureTime: new Date() } } : {}),
+      };
+
+      const { res, status } = await new Promise<{res?: google.maps.DirectionsResult, status: google.maps.DirectionsStatus}>((resolve) => {
+        let timedOut = false;
+        const t = setTimeout(() => { timedOut = true; resolve({ status: google.maps.DirectionsStatus.INVALID_REQUEST }); }, 9000);
+        svc.route(req, (r, s) => { if (!timedOut) { clearTimeout(t); resolve({ res: r || undefined, status: s }); } });
+      });
+
+      console.warn("[Directions] status:", status, "mode:", m); // <-- watch this in console
+
+      if (status === google.maps.DirectionsStatus.OK && res?.routes?.length) {
+        directionsRendererRef.current!.setDirections(res);
+        return;
       }
     }
-    // All failed -> clear polyline, keep minutes from server
-    directionsRendererRef.current.setDirections({ routes: [] } as any);
-  }
+    directionsRendererRef.current!.setDirections({ routes: [] } as any);
+  })();
+}
+
+// When a marker is clicked:
+if (safeCenter) drawRoute(safeCenter, { lat: pos.lat, lng: pos.lng }, mode);
 
   // ---------- Nearby fetch (only for requested categories) ----------
   async function fetchNearbyFor(L: Listing) {
