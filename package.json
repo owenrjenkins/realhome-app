@@ -9,8 +9,9 @@
     "start": "next start",
     "build:data": "node scripts/build_uk_sales_dataset.js"
   },
-  "dependencies": {
+ "dependencies": {
     "@googlemaps/js-api-loader": "^1.16.10",
+    "@googlemaps/markerclusterer": "^2.5.3",
     "next": "15.5.2",
     "papaparse": "^5.5.3",
     "react": "19.1.0",
