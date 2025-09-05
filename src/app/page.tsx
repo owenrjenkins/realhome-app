@@ -1,21 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import dynamic from "next/dynamic";
+import { useEffect, useMemo, useState } from "react";
 import LoadingSpinner from "@/components/LoadingSpinner";
 import ErrorBanner from "@/components/ErrorBanner";
 import Badge from "@/components/Badge";
 import { loadListingsCsv, type MinimalListing } from "@/lib/loadCsv";
-
-const Map = dynamic(() => import("@/components/Map"), { ssr: false });
-
-type ListingExt = MinimalListing & {
-  id: string;
-  latitude: number;
-  longitude: number;
-  price_gbp: number;
-  _mins?: number;
-};
+import Map, { type Listing as MapListing } from "@/components/Map";
 
 // ---------- geo helpers ----------
 const UK_BBOX = { minLat: 49.0, maxLat: 59.5, minLng: -8.5, maxLng: 2.5 };
@@ -107,7 +97,16 @@ function parseBudgetBeds(text: string) {
   return { minBudget, maxBudget, beds };
 }
 
-// ---------- component ----------
+// ---------- types ----------
+type ListingExt = MinimalListing & {
+  id: string;
+  latitude: number;
+  longitude: number;
+  price_gbp: number;
+  _mins?: number; // commute mins
+};
+
+// ---------- page ----------
 export default function Page() {
   const [text, setText] = useState(
     "Quiet street near a big park, cafés and a good supermarket, under 45 minutes to central Manchester by car. 3 beds between £400,000 and £800,000."
@@ -118,14 +117,6 @@ export default function Page() {
   const [durations, setDurations] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(false);
   const [errMsg, setErrMsg] = useState("");
-
-  // detail drawer
-  const [selected, setSelected] = useState<ListingExt | null>(null);
-  const [nearby, setNearby] = useState<{ park?: { name: string; distance_m: number }; supermarket?: { name: string; distance_m: number } } | null>(null);
-  const [route, setRoute] = useState<{ duration_min: number; steps: any[] } | null>(null);
-
-  // map controller
-  const mapCtlRef = useRef<{ focusOn: (id: string) => void } | null>(null);
 
   useEffect(() => {
     loadListingsCsv()
@@ -167,37 +158,34 @@ export default function Page() {
       })
       .sort((a, b) => (a._mins ?? 9999) - (b._mins ?? 9999));
 
-    return arr.slice(0, 10); // ← top 10 only
+    return arr.slice(0, 10);
   }, [listings, destination, text, durations]);
 
   async function runSearch() {
     setErrMsg("");
     setLoading(true);
     setDurations({});
-    setSelected(null);
-    setNearby(null);
-    setRoute(null);
 
     try {
       const { dest, mode } = parseCommuteFromText(text);
 
       // UK-biased geocode
-     const destQuery = /,\s*(uk|united kingdom|great britain)/i.test(dest) ? dest : `${dest}, UK`;
-const g = await fetch("/api/geocode", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ query: destQuery }),
-});
-if (!g.ok) {
-  const gj = await g.json().catch(() => ({}));
-  const msg = gj?.error || "Failed to geocode destination";
-  throw new Error(msg);
-}
+      const destQuery = /,\s*(uk|united kingdom|great britain)/i.test(dest) ? dest : `${dest}, UK`;
+      const g = await fetch("/api/geocode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: destQuery }),
+      });
+      if (!g.ok) {
+        const gj = await g.json().catch(() => ({}));
+        const msg = gj?.error || "Failed to geocode destination";
+        throw new Error(msg);
+      }
       const gjson = await g.json();
       const anchor = { lat: gjson.lat, lng: gjson.lng, name: gjson.name || dest };
       setDestination(anchor);
 
-      // Commute durations for candidates near the anchor
+      // Commute durations for listings near the anchor
       if (listings) {
         const radiusKm = 25;
         const nearby = listings
@@ -218,7 +206,7 @@ if (!g.ok) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            origin: { lat: anchor.lat, lng: anchor.lng }, // destination/work
+            origin: { lat: anchor.lat, lng: anchor.lng },
             mode,
             listings: nearby.slice(0, 200).map((L) => ({ id: L.id, latitude: L.latitude, longitude: L.longitude })),
           }),
@@ -235,42 +223,24 @@ if (!g.ok) {
     }
   }
 
-  // open details: Nearby + Directions
-  async function openDetails(L: ListingExt) {
-    setSelected(L);
-    setNearby(null);
-    setRoute(null);
+  // Map expects listings shaped as MapListing[]
+  const mapListings: MapListing[] = useMemo(
+    () =>
+      filteredListings.map((L) => ({
+        id: L.id,
+        latitude: L.latitude,
+        longitude: L.longitude,
+        price_gbp: L.price_gbp,
+        bedrooms: (L as any).bedrooms,
+        address_line: (L as any).address_line,
+        postcode: L.postcode,
+        city: L.city,
+        commute_mins: L._mins,
+      })),
+    [filteredListings]
+  );
 
-    try {
-      const n = await fetch("/api/nearby", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lat: L.latitude, lng: L.longitude }),
-      });
-      if (n.ok) setNearby(await n.json());
-    } catch {}
-
-    try {
-      if (destination) {
-        const { mode } = parseCommuteFromText(text);
-        const d = await fetch("/api/directions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            origin: { lat: L.latitude, lng: L.longitude },         // home
-            destination: { lat: destination.lat, lng: destination.lng }, // work / POI
-            mode,
-          }),
-        });
-        if (d.ok) setRoute(await d.json());
-      }
-    } catch {}
-  }
-
-  function focusPin(L: ListingExt) {
-    mapCtlRef.current?.focusOn(L.id);
-    openDetails(L);
-  }
+  const currentMode = parseCommuteFromText(text).mode;
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-pink-50">
@@ -287,7 +257,7 @@ if (!g.ok) {
           rows={3}
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder="Describe your ideal location… (e.g., “under 45 minutes to central Manchester by car, 3 beds between £400k and £800k, near a big park and supermarket.”)"
+          placeholder='Describe your ideal location… (e.g., “under 45 minutes to central Manchester by car, 3 beds between £400k and £800k, near a big park and supermarket.”)'
         />
         <button
           onClick={runSearch}
@@ -300,35 +270,26 @@ if (!g.ok) {
       </section>
 
       {destination && (
-        <div className="max-w-7xl mx-auto px-6 pb-8 text-sm text-gray-700">
+        <div className="max-w-7xl mx-auto px-6 pb-2 text-sm text-gray-700">
           Destination: <span className="font-medium">{destination.name}</span>
         </div>
       )}
 
       {destination && (
         <section className="grid md:grid-cols-3 gap-6 max-w-7xl mx-auto p-6">
-          <div className="md:col-span-2">
-            <Map
-              center={{ lat: destination.lat, lng: destination.lng }}
-              listings={filteredListings}
-              durations={durations}
-              onSelect={(l) => openDetails(l as ListingExt)}
-              onReady={(ctl) => (mapCtlRef.current = ctl)}
-            />
+          {/* Map */}
+          <div className="md:col-span-2" style={{ minHeight: 560 }}>
+            <Map origin={{ lat: destination.lat, lng: destination.lng }} mode={currentMode} listings={mapListings} height={560} />
           </div>
 
+          {/* Top 10 list */}
           <div className="space-y-4">
             <h2 className="text-lg font-semibold">Top 10 listings</h2>
             {filteredListings.map((L) => (
-              <div key={L.id} className="group p-4 rounded-xl border bg-white shadow hover:shadow-md transition">
-                <button
-                  onClick={() => focusPin(L)}
-                  className="font-semibold text-indigo-700 group-hover:underline"
-                  title="Show on map"
-                >
-                  £{(L.price_gbp || 0).toLocaleString()}
-                </button>{" "}
-                · {L.bedrooms} bed {L.property_type}
+              <div key={L.id} className="p-4 rounded-xl border bg-white shadow hover:shadow-md transition">
+                <div className="font-semibold text-indigo-700">
+                  £{(L.price_gbp || 0).toLocaleString()} · {L.bedrooms} bed {L.property_type}
+                </div>
                 <div className="text-xs text-gray-600 mt-0.5">
                   {L.postcode}, {L.city}
                   {typeof L._mins === "number" && <span> · Commute {L._mins} min</span>}
@@ -337,108 +298,6 @@ if (!g.ok) {
             ))}
           </div>
         </section>
-      )}
-
-      {/* Details drawer with WHY + Nearby + Route basics */}
-      {selected && (
-        <div className="fixed inset-0 bg-black/40 flex items-end md:items-center justify-center z-50" onClick={() => setSelected(null)}>
-          <div className="bg-white w-full md:max-w-xl rounded-t-2xl md:rounded-2xl p-5 space-y-3" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold">Listing details</h3>
-              <button className="text-sm px-3 py-1 rounded-lg border" onClick={() => setSelected(null)}>Close</button>
-            </div>
-
-            <div className="text-sm">
-              <div className="font-medium">
-                £{(selected.price_gbp || 0).toLocaleString()} · {selected.bedrooms} bed {selected.property_type}
-              </div>
-              <div className="text-gray-600">
-                {selected.postcode}, {selected.city}
-                {typeof selected._mins === "number" && destination && (
-                  <span> · Commute to <strong>{destination.name}</strong>: {selected._mins} min</span>
-                )}
-              </div>
-
-              {/* Nearby */}
-              <div className="mt-3">
-                <div className="font-medium">Nearby</div>
-                <ul className="list-disc list-inside text-gray-700">
-                  <li>
-                    Park:{" "}
-                    {nearby?.park ? (
-                      <>
-                        {nearby.park.name} ({nearby.park.distance_m} m)
-                      </>
-                    ) : (
-                      "searching…"
-                    )}
-                  </li>
-                  <li>
-                    Supermarket:{" "}
-                    {nearby?.supermarket ? (
-                      <>
-                        {nearby.supermarket.name} ({nearby.supermarket.distance_m} m)
-                      </>
-                    ) : (
-                      "searching…"
-                    )}
-                  </li>
-                </ul>
-              </div>
-
-              {/* Why this matches */}
-              <div className="mt-3">
-                <div className="font-medium">Why this matches</div>
-                <ul className="list-disc list-inside text-gray-700">
-                  {(() => {
-                    const { minsFallback, minMins, maxMins } = parseCommuteFromText(text);
-                    const commuteRule = minMins || maxMins ? `${minMins ? `≥${minMins}` : ""}${minMins && maxMins ? " & " : ""}${maxMins ? `≤${maxMins}` : ""} min` : `≤ ${minsFallback} min`;
-                    return (
-                      <>
-                        {typeof selected._mins === "number" && (
-                          <li>
-                            Commute {commuteRule} ({selected._mins} min)
-                          </li>
-                        )}
-                        <li>Bedrooms: {selected.bedrooms} (meets your minimum)</li>
-                        <li>Within your budget (see price)</li>
-                        <li>Close to a park & supermarket (see Nearby)</li>
-                      </>
-                    );
-                  })()}
-                </ul>
-              </div>
-
-              {/* Route basics */}
-              <div className="mt-3">
-                <div className="font-medium">Route basics</div>
-                {!route && <div className="text-gray-600">fetching route…</div>}
-                {route && (
-                  <div className="space-y-2 text-gray-800">
-                    <div>Total: <span className="font-medium">{route.duration_min} min</span></div>
-                    <ol className="list-decimal list-inside space-y-1">
-                      {route.steps.map((s: any, i: number) =>
-                        s.type === "TRANSIT" ? (
-                          <li key={i}>
-                            {s.vehicle} — {s.line} towards {s.headsign} · {s.num_stops} stops
-                            <div className="text-xs text-gray-600">
-                              {s.departure_stop} → {s.arrival_stop}
-                            </div>
-                          </li>
-                        ) : (
-                          <li key={i}>
-                            Walk/Drive — {s.duration_min} min ({Math.round((s.distance_m || 0) / 100) / 10} km)
-                            {s.instruction ? <span className="text-xs text-gray-600"> · {s.instruction}</span> : null}
-                          </li>
-                        )
-                      )}
-                    </ol>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
       )}
     </main>
   );
