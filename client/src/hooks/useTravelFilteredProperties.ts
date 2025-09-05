@@ -17,13 +17,12 @@ export type Property = {
   bedrooms: number;
   lat: number;
   lng: number;
-  // Populated by server when the listing passes travel-time filter
-  travelSeconds?: number;
+  travelSeconds?: number; // set by server when it passes the travel-time filter
 };
 
 export type Meta = {
   total: number;       // total rows in CSV
-  considered: number;  // prefiltered candidates Distance Matrix was run on
+  considered: number;  // candidates Distance Matrix was run on
   matched: number;     // items that passed (== items.length)
 };
 
@@ -32,10 +31,7 @@ export function useTravelFilteredProperties(
   mode: "driving" | "transit" | "walking" | "bicycling",
   maxMins: number,
   filters: Filters,
-  opts?: {
-    maxCandidates?: number; // optional override; server default is 2000 (see server/index.js patch)
-    abortRef?: React.MutableRefObject<AbortController | null>;
-  }
+  opts?: { maxCandidates?: number }
 ) {
   const [props, setProps] = useState<Property[]>([]);
   const [meta, setMeta] = useState<Meta | null>(null);
@@ -43,40 +39,43 @@ export function useTravelFilteredProperties(
 
   useEffect(() => {
     if (!origin) return;
-
-    // allow external abort if provided
     const controller = new AbortController();
-    if (opts?.abortRef) opts.abortRef.current = controller;
 
     setLoading(true);
-    setMeta(null);
     setProps([]);
+    setMeta(null);
 
     (async () => {
       try {
-        const body = {
-          origin,
-          mode,
-          maxMins,
-          filters,
-          // Ask server for more breadth so map shows *all* that pass
-          maxCandidates: opts?.maxCandidates ?? 4000,
-        };
-
         const resp = await fetch("/api/properties/travel-filter", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
           signal: controller.signal,
+          body: JSON.stringify({
+            origin,
+            mode,
+            maxMins,
+            filters,
+            maxCandidates: opts?.maxCandidates ?? 4000, // ask server for breadth
+          }),
         });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json() as {
+          items: Property[];
+          total: number;
+          considered: number;
+          matched: number;
+        };
 
-        const data = await resp.json() as { items: Property[]; total: number; considered: number; matched: number };
-        // CRITICAL: do NOT slice here – map must receive *all* verified matches
+        // IMPORTANT: do NOT slice – the map must render ALL verified matches
         setProps(Array.isArray(data.items) ? data.items : []);
-        setMeta({ total: data.total ?? 0, considered: data.considered ?? 0, matched: data.matched ?? (data.items?.length ?? 0) });
-      } catch (e) {
-        if ((e as any)?.name !== "AbortError") {
+        setMeta({
+          total: data.total ?? 0,
+          considered: data.considered ?? 0,
+          matched: data.matched ?? (data.items?.length ?? 0),
+        });
+      } catch (e: any) {
+        if (e?.name !== "AbortError") {
           console.error("travel-filter fetch failed:", e);
           setProps([]);
           setMeta(null);
@@ -86,16 +85,17 @@ export function useTravelFilteredProperties(
       }
     })();
 
-    return () => {
-      controller.abort();
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => controller.abort();
   }, [
-    origin?.lat, origin?.lng,
+    origin?.lat,
+    origin?.lng,
     mode,
     maxMins,
-    filters.priceMin, filters.priceMax, filters.bedroomsMin, filters.bedroomsMax,
-    opts?.maxCandidates
+    filters.priceMin,
+    filters.priceMax,
+    filters.bedroomsMin,
+    filters.bedroomsMax,
+    opts?.maxCandidates,
   ]);
 
   return { props, loading, meta };
