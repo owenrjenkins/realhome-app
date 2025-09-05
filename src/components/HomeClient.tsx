@@ -168,24 +168,30 @@ export default function HomeClient() {
     return { strict: strictArr.slice(0, 50), nearMiss: nearArr.slice(0, 50) };
   }, [listings, destination, durations, minsFallback, maxMins, minBudget, maxBudget, beds, targetMaxMins]);
 
-  // Narrative aggregation by area
+  // Narrative aggregation by area (NO .values() / iterators — object-only)
   const topAreas = useMemo(() => {
-    const areaCounts = new Map<string, { key: string; area: ReturnType<typeof lookupNearestArea>; count: number }>();
+    type AreaAgg = { key: string; area: ReturnType<typeof lookupNearestArea> | null; count: number };
+    const agg: Record<string, AreaAgg> = {};
+
     const up = (lat: number, lng: number) => {
-      const a = lookupNearestArea(lat, lng);
-      const key = a ? a.key : "unknown";
-      const bucket = areaCounts.get(key) || { key, area: a, count: 0 };
-      bucket.count += 1;
-      areaCounts.set(key, bucket);
+      const area = lookupNearestArea(lat, lng) || null;
+      const key = area ? area.key : "unknown";
+      if (!agg[key]) agg[key] = { key, area, count: 0 };
+      agg[key].count += 1;
     };
+
     for (const L of strict) up(L.latitude, L.longitude);
-    if (areaCounts.size < 3) for (const L of nearMiss) up(L.latitude, L.longitude);
-    return Array.from(areaCounts.values()).sort((a, b) => b.count - a.count).map(({ area, count }) => ({ area, count }));
+    if (Object.keys(agg).length < 3) for (const L of nearMiss) up(L.latitude, L.longitude);
+
+    const arr = Object.keys(agg).map((k) => agg[k]);
+    arr.sort((a, b) => b.count - a.count);
+    // Output shape: { area, count }
+    return arr.map(({ area, count }) => ({ area, count }));
   }, [strict, nearMiss]);
 
-  const narrativeText = useMemo(
-    () =>
-      buildNarrative({
+  const narrativeText = useMemo(() => {
+    try {
+      return buildNarrative({
         destinationName: destination?.name || dest,
         mode,
         maxMins: targetMaxMins,
@@ -194,10 +200,21 @@ export default function HomeClient() {
         budget: { min: minBudget, max: maxBudget },
         beds,
         topAreas,
-      }),
-    [destination?.name, dest, mode, targetMaxMins, strict.length, nearMiss.length, minBudget, maxBudget, beds, topAreas]
-  );
-  const areaBullets = useMemo(() => buildAreaBullets(topAreas), [topAreas]);
+      });
+    } catch (e) {
+      console.error("Narrative build failed:", e);
+      return "Here’s what we’re seeing based on your brief.";
+    }
+  }, [destination?.name, dest, mode, targetMaxMins, strict.length, nearMiss.length, minBudget, maxBudget, beds, topAreas]);
+
+  const areaBullets = useMemo(() => {
+    try {
+      return buildAreaBullets(topAreas);
+    } catch (e) {
+      console.error("Area bullets build failed:", e);
+      return [];
+    }
+  }, [topAreas]);
 
   // Build list for Map (strict only for now)
   const mapListings = useMemo(
