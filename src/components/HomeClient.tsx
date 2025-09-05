@@ -7,10 +7,9 @@ import ErrorBanner from "@/components/ErrorBanner";
 import Badge from "@/components/Badge";
 import { loadListingsCsv, type MinimalListing } from "@/lib/loadCsv";
 import NarrativePanel from "@/components/NarrativePanel";
-import { lookupNearestArea } from "@/lib/areaCatalog";
 import { buildNarrative, buildAreaBullets } from "@/lib/narrative";
+import type { MapListing } from "@/components/Map";
 
-// Load Map only on the client (prevents SSR/prerender errors)
 const Map = nextDynamic(() => import("@/components/Map"), { ssr: false });
 
 // ---------- geo helpers ----------
@@ -22,8 +21,11 @@ function isSaneCoord(lat: number, lng: number) {
   return Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && !(lat === 0 && lng === 0);
 }
 function distanceKm(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
-  const R = 6371, dLat = ((b.lat - a.lat) * Math.PI) / 180, dLng = ((b.lng - a.lng) * Math.PI) / 180;
-  const s1 = Math.sin(dLat / 2), s2 = Math.sin(dLng / 2);
+  const R = 6371,
+    dLat = ((b.lat - a.lat) * Math.PI) / 180,
+    dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const s1 = Math.sin(dLat / 2),
+    s2 = Math.sin(dLng / 2);
   return 2 * R * Math.asin(Math.sqrt(s1 * s1 + Math.cos((a.lat * Math.PI) / 180) * Math.cos((b.lat * Math.PI) / 180) * s2 * s2));
 }
 function ensureId(L: any) {
@@ -34,11 +36,10 @@ function ensureId(L: any) {
   return `${lat},${lng},${price}`;
 }
 
-// ---------- parsing (robust) ----------
+// ---------- parsing ----------
 function parseCommuteFromText(text: string) {
   const s = (text || "").toLowerCase();
 
-  // minutes: under/over/between or single “XX minutes”
   let minsFallback = 60;
   let minMins: number | undefined;
   let maxMins: number | undefined;
@@ -58,7 +59,7 @@ function parseCommuteFromText(text: string) {
   const plainM = s.match(/\b(\d+)\s*(?:min|mins|minutes)\b/);
   if (plainM && !minMins && !maxMins) minsFallback = Number(plainM[1]);
 
-  // destination: support "to X by ..." and "from X by ..."
+  // destination: support both “to X by …” and “from X by …”
   const toMatch = text.match(/\bto\s+(.+?)(?:\s+by|\s*[,.;]|$)/i);
   const fromMatch = text.match(/\bfrom\s+(.+?)(?:\s+by|\s*[,.;]|$)/i);
   const dest = (toMatch?.[1] || fromMatch?.[1] || "City of London").trim();
@@ -76,7 +77,6 @@ function parseCommuteFromText(text: string) {
 function parseBudgetBeds(text: string) {
   const s = (text || "").toLowerCase();
 
-  // Helpers
   const toNumber = (num: string, unit?: string) => {
     const n = Number(num);
     if (unit === "m") return Math.round(n * 1_000_000);
@@ -87,8 +87,6 @@ function parseBudgetBeds(text: string) {
   let minBudget: number | undefined;
   let maxBudget: number | undefined;
 
-  // Only treat a number as money if it’s prefixed with £ or suffixed with k/m,
-  // and IGNORE numbers followed by "minutes".
   const UNDER_RE = /\bunder\s*£?\s*(\d+(?:\.\d+)?)\s*(k|m)?\b(?!\s*(?:min|mins|minutes))/i;
   const OVER_RE = /\bover\s*£?\s*(\d+(?:\.\d+)?)\s*(k|m)?\b(?!\s*(?:min|mins|minutes))/i;
   const BETWEEN_RE = /\bbetween\s*£?\s*(\d+(?:\.\d+)?)\s*(k|m)?\s*(?:and|to|-)\s*£?\s*(\d+(?:\.\d+)?)\s*(k|m)?\b(?!\s*(?:min|mins|minutes))/i;
@@ -106,11 +104,38 @@ function parseBudgetBeds(text: string) {
     if (mOver) minBudget = toNumber(mOver[1], mOver[2] as any);
   }
 
-  // Beds
   const bm = s.match(/(\d+)\s*(?:bed|beds|bedroom|bedrooms)\b/i);
   const beds = bm ? Number(bm[1]) : undefined;
 
   return { minBudget, maxBudget, beds };
+}
+
+// ---------- helpers for narrative areas ----------
+function outwardOf(postcode?: string) {
+  if (!postcode) return "";
+  const token = postcode.trim().toUpperCase().split(/\s+/)[0]; // "SE1", "N1", "CR0"
+  return token || "";
+}
+function outwardToName(outward: string) {
+  // Minimal mapping; expand as needed
+  if (/^SE/i.test(outward)) return "South East London";
+  if (/^SW/i.test(outward)) return "South West London";
+  if (/^EC/i.test(outward)) return "City/EC";
+  if (/^WC/i.test(outward)) return "Westminster/WC";
+  if (/^N/i.test(outward)) return "North London";
+  if (/^NW/i.test(outward)) return "North West London";
+  if (/^E/i.test(outward)) return "East London";
+  if (/^W/i.test(outward)) return "West London";
+  if (/^BR/i.test(outward)) return "Bromley";
+  if (/^CR/i.test(outward)) return "Croydon";
+  if (/^EN/i.test(outward)) return "Enfield";
+  if (/^IG/i.test(outward)) return "Ilford";
+  if (/^KT/i.test(outward)) return "Kingston";
+  if (/^RM/i.test(outward)) return "Romford";
+  if (/^SM/i.test(outward)) return "Sutton";
+  if (/^TW/i.test(outward)) return "Twickenham";
+  if (/^UB/i.test(outward)) return "Uxbridge";
+  return outward; // fallback to the outward code itself
 }
 
 // ---------- types ----------
@@ -119,13 +144,13 @@ type ListingExt = MinimalListing & {
   latitude: number;
   longitude: number;
   price_gbp: number;
-  _mins?: number; // commute mins
+  _mins?: number;
 };
 
 // ---------- component ----------
 export default function HomeClient() {
   const [text, setText] = useState(
-    "Under 60 minutes to London Bridge by public transport. 4 beds under £1m. Near a big park and supermarket."
+    "Under 60 minutes to London Bridge by public transport. 4 beds under £1.5m. Near a big park and supermarket."
   );
 
   const [destination, setDestination] = useState<{ lat: number; lng: number; name: string } | null>(null);
@@ -133,6 +158,11 @@ export default function HomeClient() {
   const [durations, setDurations] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(false);
   const [errMsg, setErrMsg] = useState("");
+
+  // details drawer
+  const [selected, setSelected] = useState<ListingExt | null>(null);
+  const [nearby, setNearby] = useState<{ park?: { name: string; distance_m: number }; supermarket?: { name: string; distance_m: number } } | null>(null);
+  const [route, setRoute] = useState<{ duration_min: number; steps: any[] } | null>(null);
 
   useEffect(() => {
     loadListingsCsv()
@@ -156,7 +186,6 @@ export default function HomeClient() {
       const latitude = Number((raw as any).latitude ?? (raw as any).lat);
       const longitude = Number((raw as any).longitude ?? (raw as any).lng);
       if (!isSaneCoord(latitude, longitude) || !isWithinUK(latitude, longitude)) continue;
-
       if (distanceKm(destination, { lat: latitude, lng: longitude }) > radiusKm) continue;
 
       const id = ensureId(raw);
@@ -165,13 +194,13 @@ export default function HomeClient() {
       const L: ListingExt = { ...(raw as any), id, latitude, longitude, price_gbp: price, _mins: commute };
 
       if (minBudget && price < minBudget) continue;
-      if (maxBudget && price > maxBudget * 1.1) continue; // > +10% over = reject
+      if (maxBudget && price > maxBudget * 1.1) continue;
       if (beds && (L as any).bedrooms < beds) continue;
 
       const timeOkStrict = typeof commute === "number" ? commute <= targetMaxMins : true;
-      const timeOkNear   = typeof commute === "number" ? commute <= Math.round(targetMaxMins * 1.2) : true;
+      const timeOkNear = typeof commute === "number" ? commute <= Math.round(targetMaxMins * 1.2) : true;
       const budgetOkStrict = !maxBudget || price <= maxBudget;
-      const budgetOkNear   = !maxBudget || price <= maxBudget * 1.1;
+      const budgetOkNear = !maxBudget || price <= maxBudget * 1.1;
 
       if (timeOkStrict && budgetOkStrict) strictArr.push(L);
       else if (timeOkNear && budgetOkNear) nearArr.push(L);
@@ -183,24 +212,22 @@ export default function HomeClient() {
     return { strict: strictArr.slice(0, 50), nearMiss: nearArr.slice(0, 50) };
   }, [listings, destination, durations, minsFallback, maxMins, minBudget, maxBudget, beds, targetMaxMins]);
 
-  // Narrative aggregation by area (object-only to avoid iterator issues)
+  // Narrative aggregation by *actual* postcode outward code
   const topAreas = useMemo(() => {
-    type AreaAgg = { key: string; area: ReturnType<typeof lookupNearestArea> | null; count: number };
-    const agg: Record<string, AreaAgg> = {};
-
-    const up = (lat: number, lng: number) => {
-      const area = lookupNearestArea(lat, lng) || null;
-      const key = area ? area.key : "unknown";
-      if (!agg[key]) agg[key] = { key, area, count: 0 };
-      agg[key].count += 1;
+    const counts: Record<string, number> = {};
+    const count = (pc?: string) => {
+      const out = outwardOf(pc);
+      if (!out) return;
+      counts[out] = (counts[out] ?? 0) + 1;
     };
+    for (const L of strict) count(L.postcode);
+    if (Object.keys(counts).length < 3) for (const L of nearMiss) count(L.postcode);
 
-    for (const L of strict) up(L.latitude, L.longitude);
-    if (Object.keys(agg).length < 3) for (const L of nearMiss) up(L.latitude, L.longitude);
+    const arr = Object.entries(counts)
+      .map(([out, n]) => ({ outward: out, name: outwardToName(out), count: n }))
+      .sort((a, b) => b.count - a.count);
 
-    const arr = Object.keys(agg).map((k) => agg[k]);
-    arr.sort((a, b) => b.count - a.count);
-    return arr.map(({ area, count }) => ({ area, count }));
+    return arr;
   }, [strict, nearMiss]);
 
   const narrativeText = useMemo(() => {
@@ -215,23 +242,14 @@ export default function HomeClient() {
         beds,
         topAreas,
       });
-    } catch (e) {
-      console.error("Narrative build failed:", e);
+    } catch {
       return "Here’s what we’re seeing based on your brief.";
     }
   }, [destination?.name, dest, mode, targetMaxMins, strict.length, nearMiss.length, minBudget, maxBudget, beds, topAreas]);
 
-  const areaBullets = useMemo(() => {
-    try {
-      return buildAreaBullets(topAreas);
-    } catch (e) {
-      console.error("Area bullets build failed:", e);
-      return [];
-    }
-  }, [topAreas]);
+  const areaBullets = useMemo(() => buildAreaBullets(topAreas), [topAreas]);
 
-  // Build list for Map (strict only for now)
-  const mapListings = useMemo(
+  const mapListings: MapListing[] = useMemo(
     () =>
       strict.map((L) => ({
         id: L.id,
@@ -250,11 +268,13 @@ export default function HomeClient() {
   async function runSearch() {
     setErrMsg("");
     setDurations({});
+    setSelected(null);
+    setNearby(null);
+    setRoute(null);
     setLoading(true);
 
     try {
       const { dest, mode } = parseCommuteFromText(text);
-      // UK bias
       const destQuery = /,\s*(uk|united kingdom|great britain)/i.test(dest) ? dest : `${dest}, UK`;
       const g = await fetch("/api/geocode", {
         method: "POST",
@@ -291,7 +311,7 @@ export default function HomeClient() {
           body: JSON.stringify({
             origin: { lat: anchor.lat, lng: anchor.lng },
             mode,
-            listings: nearby.slice(0, 200).map((L) => ({ id: L.id, latitude: L.latitude, longitude: L.longitude })),
+            listings: nearby.slice(0, 300).map((L) => ({ id: L.id, latitude: L.latitude, longitude: L.longitude })),
           }),
         });
         if (cRes.ok) {
@@ -304,6 +324,39 @@ export default function HomeClient() {
     } finally {
       setLoading(false);
     }
+  }
+
+  // Pin → fetch Nearby + Directions and show drawer
+  async function openDetails(L: MapListing) {
+    const ext = strict.find((s) => s.id === L.id) || (nearMiss.find((s) => s.id === L.id) as any);
+    if (ext) setSelected(ext as ListingExt);
+
+    setNearby(null);
+    setRoute(null);
+
+    try {
+      const n = await fetch("/api/nearby", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lat: L.latitude, lng: L.longitude }),
+      });
+      if (n.ok) setNearby(await n.json());
+    } catch {}
+
+    try {
+      if (destination) {
+        const d = await fetch("/api/directions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            origin: { lat: L.latitude, lng: L.longitude }, // home
+            destination: { lat: destination.lat, lng: destination.lng }, // work
+            mode,
+          }),
+        });
+        if (d.ok) setRoute(await d.json());
+      }
+    } catch {}
   }
 
   return (
@@ -321,7 +374,7 @@ export default function HomeClient() {
           rows={3}
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder='Describe your ideal location… (e.g., “under 60 minutes to London Bridge by public transport, 4 beds under £1m, near a park and supermarket.”)'
+          placeholder='Describe your ideal location… (e.g., “under 60 minutes to London Bridge by public transport, 4 beds under £1.5m, near a park and supermarket.”)'
         />
         <button
           onClick={runSearch}
@@ -335,17 +388,20 @@ export default function HomeClient() {
 
       {destination && (
         <div className="max-w-7xl mx-auto grid md:grid-cols-3 gap-6 p-6">
-          {/* Narrative */}
           <div className="md:col-span-3">
             <NarrativePanel text={narrativeText} bullets={areaBullets} />
           </div>
 
-          {/* Map */}
           <div className="md:col-span-2" style={{ minHeight: 560 }}>
-            <Map origin={{ lat: destination.lat, lng: destination.lng }} mode={mode} listings={mapListings} height={560} />
+            <Map
+              origin={{ lat: destination.lat, lng: destination.lng }}
+              mode={mode}
+              listings={mapListings}
+              height={560}
+              onSelect={openDetails} // <-- wire pin → details
+            />
           </div>
 
-          {/* Best matches */}
           <div className="space-y-4">
             <h2 className="text-lg font-semibold">Best matches</h2>
             {strict.slice(0, 10).map((L) => (
@@ -359,21 +415,73 @@ export default function HomeClient() {
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      )}
 
-            {nearMiss.length > 0 && (
-              <div className="p-3 rounded-lg border bg-white/70">
-                <div className="font-semibold mb-1">Near misses worth a look</div>
-                <div className="text-xs text-gray-600 mb-2">
-                  Slightly over time (+20%) or budget (+10%). Adjust filters if they look promising.
-                </div>
-                {nearMiss.slice(0, 6).map((L) => (
-                  <div key={L.id} className="py-1 text-sm">
-                    £{(L.price_gbp || 0).toLocaleString()} · {L.bedrooms} bed — {L.postcode}{" "}
-                    {typeof L._mins === "number" ? `· ${L._mins} min` : ""}
-                  </div>
-                ))}
+      {/* Details drawer */}
+      {selected && (
+        <div className="fixed inset-0 bg-black/40 flex items-end md:items-center justify-center z-50" onClick={() => setSelected(null)}>
+          <div className="bg-white w-full md:max-w-xl rounded-t-2xl md:rounded-2xl p-5 space-y-3" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Listing details</h3>
+              <button className="text-sm px-3 py-1 rounded-lg border" onClick={() => setSelected(null)}>Close</button>
+            </div>
+
+            <div className="text-sm">
+              <div className="font-medium">
+                £{(selected.price_gbp || 0).toLocaleString()} · {selected.bedrooms} bed {selected.property_type}
               </div>
-            )}
+              <div className="text-gray-600">
+                {selected.postcode}, {selected.city}
+                {typeof selected._mins === "number" && destination && (
+                  <span> · Commute to <strong>{destination.name}</strong>: {selected._mins} min</span>
+                )}
+              </div>
+
+              {/* Nearby */}
+              <div className="mt-3">
+                <div className="font-medium">Nearby</div>
+                <ul className="list-disc list-inside text-gray-700">
+                  <li>
+                    Park:{" "}
+                    {nearby?.park ? `${nearby.park.name} (${nearby.park.distance_m} m)` : "searching…"}
+                  </li>
+                  <li>
+                    Supermarket:{" "}
+                    {nearby?.supermarket ? `${nearby.supermarket.name} (${nearby.supermarket.distance_m} m)` : "searching…"}
+                  </li>
+                </ul>
+              </div>
+
+              {/* Route basics */}
+              <div className="mt-3">
+                <div className="font-medium">Route basics</div>
+                {!route && <div className="text-gray-600">fetching route…</div>}
+                {route && (
+                  <div className="space-y-2 text-gray-800">
+                    <div>Total: <span className="font-medium">{route.duration_min} min</span></div>
+                    <ol className="list-decimal list-inside space-y-1">
+                      {route.steps.map((s: any, i: number) =>
+                        s.type === "TRANSIT" ? (
+                          <li key={i}>
+                            {s.vehicle} — {s.line} towards {s.headsign} · {s.num_stops} stops
+                            <div className="text-xs text-gray-600">
+                              {s.departure_stop} → {s.arrival_stop}
+                            </div>
+                          </li>
+                        ) : (
+                          <li key={i}>
+                            Walk/Drive — {s.duration_min} min ({Math.round((s.distance_m || 0) / 100) / 10} km)
+                            {s.instruction ? <span className="text-xs text-gray-600"> · {s.instruction}</span> : null}
+                          </li>
+                        )
+                      )}
+                    </ol>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       )}
